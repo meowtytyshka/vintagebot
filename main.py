@@ -21,8 +21,7 @@ PORT = int(os.getenv("PORT", 10000))
 BASE_URL = os.getenv("RENDER_EXTERNAL_URL", "https://vintagebot-97dr.onrender.com")
 WEBHOOK_PATH = f"/webhook/{TOKEN}"
 WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
-
-ADMIN_ID = 692408588
+ADMIN_ID = int(os.getenv("ADMIN_ID", 692408588))  # Добавлена возможность из env
 CATALOG_FILE = Path("catalog.json")
 
 # ========================== Каталог ==========================
@@ -30,7 +29,8 @@ def load_catalog():
     if CATALOG_FILE.exists():
         try:
             return json.loads(CATALOG_FILE.read_text(encoding="utf-8"))
-        except:
+        except Exception as e:
+            logger.error(f"Error loading catalog: {e}")
             return []
     return []
 
@@ -76,13 +76,19 @@ async def start(m: types.Message):
         reply_markup=main_kb
     )
 
+# ========================== Отмена ==========================
+@dp.message(Command("cancel"))
+async def cancel(m: types.Message, state: FSMContext):
+    await state.clear()
+    await m.answer("Действие отменено", reply_markup=main_kb)
+
 # ========================== Админ ==========================
 @dp.message(Command("add"))
 async def cmd_add(m: types.Message, state: FSMContext):
     if m.from_user.id != ADMIN_ID:
         return await m.answer("Ты не админ")
     await state.set_state(Form.photos)
-    await m.answer("Пришли фото лота (1–10 шт)", reply_markup=ReplyKeyboardRemove())
+    await m.answer("Пришли фото лота (1–10 шт). Можно альбомом.", reply_markup=ReplyKeyboardRemove())
 
 @dp.message(Command("del"))
 async def cmd_del(m: types.Message):
@@ -95,6 +101,120 @@ async def cmd_del(m: types.Message):
         await m.answer(f"Лот №{lot_id} удалён")
     except:
         await m.answer("Использование: /del 7")
+
+# ========================== Админ добавление лота ==========================
+@dp.message(Form.photos, F.photo)
+async def admin_photos(m: types.Message, state: FSMContext):
+    if m.from_user.id != ADMIN_ID: return
+    data = await state.get_data()
+    photos = data.get('photos', [])
+    photos.append(m.photo[-1].file_id)
+    await state.update_data(photos=photos)
+    await m.answer(f"Фото добавлено (всего {len(photos)} шт)")
+
+@dp.message(Form.title, F.text)
+async def admin_title(m: types.Message, state: FSMContext):
+    if m.from_user.id != ADMIN_ID: return
+    await state.update_data(title=m.text)
+    await state.set_state(Form.comment)
+    await m.answer("Описание лота")
+
+@dp.message(Form.comment, F.text)
+async def admin_finish(m: types.Message, state: FSMContext):
+    if m.from_user.id != ADMIN_ID: return
+    data = await state.get_data()
+    max_id = max([l['id'] for l in catalog] or [0]) + 1
+    new_lot = {
+        "id": max_id,
+        "photos": data["photos"],
+        "title": data["title"],
+        "desc": m.text
+    }
+    catalog.append(new_lot)
+    save_catalog()
+    await m.answer(f"Лот №{new_lot['id']} добавлен!", reply_markup=main_kb)
+    await state.clear()
+
+# ========================== Форма продажи (пользователи) ==========================
+@dp.message(F.text == "Продать вещь")
+async def sell_start(m: types.Message, state: FSMContext):
+    await state.set_state(Form.photos)
+    await m.answer("Пришли фото вещи (1–10 шт). Можно альбомом.", reply_markup=ReplyKeyboardRemove())
+
+@dp.message(Form.photos, F.photo)
+async def sell_photos(m: types.Message, state: FSMContext):
+    data = await state.get_data()
+    photos = data.get('photos', [])
+    photos.append(m.photo[-1].file_id)
+    await state.update_data(photos=photos)
+    await m.answer(f"Фото добавлено (всего {len(photos)} шт)")
+
+@dp.message(Form.title, F.text)
+async def sell_title(m: types.Message, state: FSMContext):
+    await state.update_data(title=m.text)
+    await state.set_state(Form.year)
+    await m.answer("Год или эпоха")
+
+@dp.message(Form.year, F.text)
+async def sell_year(m: types.Message, state: FSMContext):
+    await state.update_data(year=m.text)
+    await state.set_state(Form.condition)
+    await m.answer("Состояние")
+
+@dp.message(Form.condition, F.text)
+async def sell_condition(m: types.Message, state: FSMContext):
+    await state.update_data(condition=m.text)
+    await state.set_state(Form.size)
+    await m.answer("Размер (или —)")
+
+@dp.message(Form.size, F.text)
+async def sell_size(m: types.Message, state: FSMContext):
+    await state.update_data(size=m.text)
+    await state.set_state(Form.price)
+    await m.answer("Желаемая цена чистыми (число)")
+
+@dp.message(Form.price)
+async def sell_price(m: types.Message, state: FSMContext):
+    try:
+        price = int(m.text)
+        await state.update_data(price=price)
+        await state.set_state(Form.city)
+        await m.answer("Город вещи")
+    except ValueError:
+        await m.answer("Цена должна быть числом. Попробуй снова:")
+
+@dp.message(Form.city, F.text)
+async def sell_city(m: types.Message, state: FSMContext):
+    await state.update_data(city=m.text)
+    await state.set_state(Form.comment)
+    await m.answer("Комментарий (по желанию)")
+
+@dp.message(Form.comment, F.text)
+async def sell_finish(m: types.Message, state: FSMContext):
+    data = await state.get_data()
+    user = m.from_user
+    text = f"""НОВАЯ ЗАЯВКА НА ПРОДАЧУ
+От: @{user.username or 'нет'} (ID: {user.id})
+{user.full_name}
+Вещь: {data['title']}
+Год: {data['year']}
+Состояние: {data['condition']}
+Размер: {data.get('size', '—')}
+Цена: {data['price']} ₽
+Город: {data['city']}
+Комментарий: {m.text or '—'}"""
+    await bot.send_message(ADMIN_ID, text)
+    if data.get('photos'):
+        media = [InputMediaPhoto(media=p) for p in data['photos'][:10]]
+        if media:
+            await bot.send_media_group(ADMIN_ID, media)
+    await m.answer("Спасибо! Заявка отправлена, скоро свяжусь лично", reply_markup=main_kb)
+    await state.clear()
+
+# ========================== Обработка неверного ввода в состояниях ==========================
+@dp.message(Form.__all_states__)
+async def invalid_input(m: types.Message):
+    await m.answer("Пожалуйста, введите текст или фото в зависимости от шага.")
 
 # ========================== Каталог ==========================
 @dp.message(F.text == "Актуальные лоты")
@@ -123,123 +243,17 @@ async def buy_lot(cb: types.CallbackQuery, state: FSMContext):
     await cb.message.answer("Напиши адрес и телефон для доставки:")
     await cb.answer()
 
-@dp.message(BuyAddress.waiting)
+@dp.message(BuyAddress.waiting, F.text)
 async def get_address(m: types.Message, state: FSMContext):
     data = await state.get_data()
     text = f"""НОВАЯ ПОКУПКА
 Лот №{data['lot_id']}
 От: @{m.from_user.username or 'нет'} (ID: {m.from_user.id})
 {m.from_user.full_name}
-
 Адрес/телефон:
 {m.text}"""
     await bot.send_message(ADMIN_ID, text)
     await m.answer("Заявка отправлена! Скоро свяжусь", reply_markup=main_kb)
-    await state.clear()
-
-# ========================== Форма продажи (пользователи) ==========================
-@dp.message(F.text == "Продать вещь")
-async def sell_start(m: types.Message, state: FSMContext):
-    await state.set_state(Form.photos)
-    await m.answer("Пришли фото вещи (1–10 шт)", reply_markup=ReplyKeyboardRemove())
-
-@dp.message(Form.photos, F.photo)
-async def sell_photos(m: types.Message, state: FSMContext):
-    photos = [p.file_id for p in m.photo]
-    await state.update_data(photos=photos)
-    await state.set_state(Form.title)
-    await m.answer(f"Получено {len(photos)} фото\n\nНазвание вещи:")
-
-@dp.message(Form.title)
-async def sell_title(m: types.Message, state: FSMContext):
-    await state.update_data(title=m.text)
-    await state.set_state(Form.year)
-    await m.answer("Год или эпоха")
-
-@dp.message(Form.year)
-async def sell_year(m: types.Message, state: FSMContext):
-    await state.update_data(year=m.text)
-    await state.set_state(Form.condition)
-    await m.answer("Состояние")
-
-@dp.message(Form.condition)
-async def sell_condition(m: types.Message, state: FSMContext):
-    await state.update_data(condition=m.text)
-    await state.set_state(Form.size)
-    await m.answer("Размер (или —)")
-
-@dp.message(Form.size)
-async def sell_size(m: types.Message, state: FSMContext):
-    await state.update_data(size=m.text)
-    await state.set_state(Form.price)
-    await m.answer("Желаемая цена чистыми")
-
-@dp.message(Form.price)
-async def sell_price(m: types.Message, state: FSMContext):
-    await state.update_data(price=m.text)
-    await state.set_state(Form.city)
-    await m.answer("Город вещи")
-
-@dp.message(Form.city)
-async def sell_city(m: types.Message, state: FSMContext):
-    await state.update_data(city=m.text)
-    await state.set_state(Form.comment)
-    await m.answer("Комментарий (по желанию)")
-
-@dp.message(Form.comment)
-async def sell_finish(m: types.Message, state: FSMContext):
-    data = await state.get_data()
-    user = m.from_user
-
-    text = f"""НОВАЯ ЗАЯВКА НА ПРОДАЧУ
-От: @{user.username or 'нет'} (ID: {user.id})
-{user.full_name}
-
-Вещь: {data['title']}
-Год: {data['year']}
-Состояние: {data['condition']}
-Размер: {data.get('size', '—')}
-Цена: {data['price']} ₽
-Город: {data['city']}
-Комментарий: {m.text or '—'}"""
-
-    await bot.send_message(ADMIN_ID, text)
-    if data.get('photos'):
-        media = [InputMediaPhoto(p) for p in data['photos'][:10]]
-        await bot.send_media_group(ADMIN_ID, media)
-
-    await m.answer("Спасибо! Заявка отправлена, скоро свяжусь лично", reply_markup=main_kb)
-    await state.clear()
-
-# ========================== Админ добавление лота ==========================
-@dp.message(Form.photos, F.photo)
-async def admin_photos(m: types.Message, state: FSMContext):
-    if m.from_user.id != ADMIN_ID: return
-    photos = [p.file_id for p in m.photo]
-    await state.update_data(photos=photos)
-    await state.set_state(Form.title)
-    await m.answer(f"Фото получено ({len(photos)} шт)\nНазвание + цена:")
-
-@dp.message(Form.title)
-async def admin_title(m: types.Message, state: FSMContext):
-    if m.from_user.id != ADMIN_ID: return
-    await state.update_data(title=m.text)
-    await state.set_state(Form.comment)
-    await m.answer("Описание лота")
-
-@dp.message(Form.comment)
-async def admin_finish(m: types.Message, state: FSMContext):
-    if m.from_user.id != ADMIN_ID: return
-    data = await state.get_data()
-    new_lot = {
-        "id": len(catalog) + 1,
-        "photos": data["photos"],
-        "title": data["title"],
-        "desc": m.text
-    }
-    catalog.append(new_lot)
-    save_catalog()
-    await m.answer(f"Лот №{new_lot['id']} добавлен!", reply_markup=main_kb)
     await state.clear()
 
 # ========================== Поддержка ==========================
@@ -257,9 +271,12 @@ async def support(m: types.Message):
 
 # ========================== Webhook ==========================
 async def on_startup(app):
-    await bot.set_webhook(WEBHOOK_URL)
-    logger.info("Webhook установлен")
-    await bot.send_message(ADMIN_ID, "БОТ 100% РАБОЧИЙ! Все баги убиты")
+    try:
+        await bot.set_webhook(WEBHOOK_URL)
+        logger.info("Webhook установлен")
+        await bot.send_message(ADMIN_ID, "БОТ 100% РАБОЧИЙ! Все баги убиты")
+    except Exception as e:
+        logger.error(f"Error setting webhook: {e}")
 
 async def on_shutdown(app):
     await bot.delete_webhook(drop_pending_updates=True)
@@ -268,10 +285,8 @@ async def on_shutdown(app):
 app = web.Application()
 app.on_startup.append(on_startup)
 app.on_shutdown.append(on_shutdown)
-
 handler = SimpleRequestHandler(dispatcher=dp, bot=bot)
 handler.register(app, path=WEBHOOK_PATH)
-
 app.router.add_get("/", lambda r: web.Response(text="OK"))
 
 if __name__ == "__main__":
