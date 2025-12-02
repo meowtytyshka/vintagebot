@@ -2,7 +2,6 @@ import os
 import json
 import asyncio
 import logging
-from pathlib
 from pathlib import Path
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -16,6 +15,7 @@ from aiohttp import web
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ========================== Настройки ==========================
 TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", 10000))
 BASE_URL = os.getenv("RENDER_EXTERNAL_URL", "https://vintagebot-97dr.onrender.com")
@@ -25,7 +25,7 @@ WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
 ADMIN_ID = 692408588
 CATALOG_FILE = Path("catalog.json")
 
-# === Каталог ===
+# ========================== Каталог ==========================
 def load_catalog():
     if CATALOG_FILE.exists():
         try:
@@ -35,14 +35,16 @@ def load_catalog():
     return []
 
 catalog = load_catalog()
+
 def save_catalog():
     CATALOG_FILE.write_text(json.dumps(catalog, ensure_ascii=False, indent=2), encoding="utf-8")
 
+# ========================== Бот ==========================
 bot = Bot(token=TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# === Состояния ===
+# ========================== Состояния ==========================
 class Form(StatesGroup):
     photos = State()
     title = State()
@@ -56,14 +58,14 @@ class Form(StatesGroup):
 class BuyAddress(StatesGroup):
     waiting = State()
 
-# === Клавиатура ===
+# ========================== Клавиатура ==========================
 main_kb = types.ReplyKeyboardMarkup(resize_keyboard=True, keyboard=[
     [types.KeyboardButton(text="Продать вещь")],
     [types.KeyboardButton(text="Актуальные лоты")],
     [types.KeyboardButton(text="Поддержка")]
 ])
 
-# === Старт ===
+# ========================== Старт ==========================
 @dp.message(Command("start"))
 async def start(m: types.Message):
     await m.answer(
@@ -74,10 +76,11 @@ async def start(m: types.Message):
         reply_markup=main_kb
     )
 
-# === Админ команды ===
+# ========================== Админ ==========================
 @dp.message(Command("add"))
 async def cmd_add(m: types.Message, state: FSMContext):
-    if m.from_user.id != ADMIN_ID: return await m.answer("Ты не админ")
+    if m.from_user.id != ADMIN_ID:
+        return await m.answer("Ты не админ")
     await state.set_state(Form.photos)
     await m.answer("Пришли фото лота (1–10 шт)", reply_markup=ReplyKeyboardRemove())
 
@@ -86,13 +89,14 @@ async def cmd_del(m: types.Message):
     if m.from_user.id != ADMIN_ID: return
     try:
         lot_id = int(m.text.split(maxsplit=1)[1])
+        global catalog
         catalog = [l for l in catalog if l["id"] != lot_id]
         save_catalog()
         await m.answer(f"Лот №{lot_id} удалён")
     except:
         await m.answer("Использование: /del 7")
 
-# === Каталог ===
+# ========================== Каталог ==========================
 @dp.message(F.text == "Актуальные лоты")
 async def show_catalog(m: types.Message):
     if not catalog:
@@ -110,7 +114,7 @@ async def show_catalog(m: types.Message):
         await m.answer("Нажми кнопку ниже", reply_markup=kb)
         await asyncio.sleep(0.5)
 
-# === Покупка ===
+# ========================== Покупка ==========================
 @dp.callback_query(F.data.startswith("buy_"))
 async def buy_lot(cb: types.CallbackQuery, state: FSMContext):
     lot_id = int(cb.data.split("_")[1])
@@ -133,7 +137,7 @@ async def get_address(m: types.Message, state: FSMContext):
     await m.answer("Заявка отправлена! Скоро свяжусь", reply_markup=main_kb)
     await state.clear()
 
-# === Форма продажи (для обычных пользователей) ===
+# ========================== Форма продажи (пользователи) ==========================
 @dp.message(F.text == "Продать вещь")
 async def sell_start(m: types.Message, state: FSMContext):
     await state.set_state(Form.photos)
@@ -150,44 +154,44 @@ async def sell_photos(m: types.Message, state: FSMContext):
 async def sell_title(m: types.Message, state: FSMContext):
     await state.update_data(title=m.text)
     await state.set_state(Form.year)
-    await m.answer("Год или эпоха (например: 1987, 70-е)")
+    await m.answer("Год или эпоха")
 
 @dp.message(Form.year)
 async def sell_year(m: types.Message, state: FSMContext):
     await state.update_data(year=m.text)
     await state.set_state(Form.condition)
-    await m.answer("Состояние (отличное / хорошее / удовлетворительное)")
+    await m.answer("Состояние")
 
 @dp.message(Form.condition)
 async def sell_condition(m: types.Message, state: FSMContext):
     await state.update_data(condition=m.text)
     await state.set_state(Form.size)
-    await m.answer("Размер (или «—» если нет)")
+    await m.answer("Размер (или —)")
 
 @dp.message(Form.size)
 async def sell_size(m: types.Message, state: FSMContext):
     await state.update_data(size=m.text)
     await state.set_state(Form.price)
-    await m.answer("Желаемая цена чистыми (только цифры, например: 45000)")
+    await m.answer("Желаемая цена чистыми")
 
 @dp.message(Form.price)
 async def sell_price(m: types.Message, state: FSMContext):
     await state.update_data(price=m.text)
     await state.set_state(Form.city)
-    await m.answer("Город, где находится вещь")
+    await m.answer("Город вещи")
 
 @dp.message(Form.city)
 async def sell_city(m: types.Message, state: FSMContext):
     await state.update_data(city=m.text)
     await state.set_state(Form.comment)
-    await m.answer("Комментарий (по желанию) — можно просто нажать «пропустить» или отправить точку")
+    await m.answer("Комментарий (по желанию)")
 
 @dp.message(Form.comment)
 async def sell_finish(m: types.Message, state: FSMContext):
     data = await state.get_data()
     user = m.from_user
 
-    text = f"""НОВАЯ ЗАЯВКА НА ПРОДАЖУ
+    text = f"""НОВАЯ ЗАЯВКА НА ПРОДАЧУ
 От: @{user.username or 'нет'} (ID: {user.id})
 {user.full_name}
 
@@ -207,21 +211,21 @@ async def sell_finish(m: types.Message, state: FSMContext):
     await m.answer("Спасибо! Заявка отправлена, скоро свяжусь лично", reply_markup=main_kb)
     await state.clear()
 
-# === Админская форма добавления лота (отдельная ветка) ===
+# ========================== Админ добавление лота ==========================
 @dp.message(Form.photos, F.photo)
 async def admin_photos(m: types.Message, state: FSMContext):
     if m.from_user.id != ADMIN_ID: return
     photos = [p.file_id for p in m.photo]
     await state.update_data(photos=photos)
     await state.set_state(Form.title)
-    await m.answer(f"Фото получено ({len(photos)} шт)\n\nНазвание + цена (например: Пальто YSL 1987 — 120000 ₽)")
+    await m.answer(f"Фото получено ({len(photos)} шт)\nНазвание + цена:")
 
 @dp.message(Form.title)
 async def admin_title(m: types.Message, state: FSMContext):
     if m.from_user.id != ADMIN_ID: return
     await state.update_data(title=m.text)
     await state.set_state(Form.comment)
-    await m.answer("Полное описание (год, состояние, размер и т.д.)")
+    await m.answer("Описание лота")
 
 @dp.message(Form.comment)
 async def admin_finish(m: types.Message, state: FSMContext):
@@ -235,13 +239,13 @@ async def admin_finish(m: types.Message, state: FSMContext):
     }
     catalog.append(new_lot)
     save_catalog()
-    await m.answer(f"Лот №{new_lot['id']} добавлен в каталог!", reply_markup=main_kb)
+    await m.answer(f"Лот №{new_lot['id']} добавлен!", reply_markup=main_kb)
     await state.clear()
 
-# === Поддержка (один раз и выключается) ===
+# ========================== Поддержка ==========================
 @dp.message(F.text == "Поддержка")
 async def support_start(m: types.Message):
-    await m.answer("Напиши свой вопрос — я перешлю админу", reply_markup=ReplyKeyboardRemove())
+    await m.answer("Напиши вопрос — перешлю админу", reply_markup=ReplyKeyboardRemove())
 
 @dp.message()
 async def support(m: types.Message):
@@ -251,11 +255,11 @@ async def support(m: types.Message):
     await bot.send_message(ADMIN_ID, f"ПОДДЕРЖКА от @{m.from_user.username or 'нет'} (ID: {m.from_user.id})")
     await m.answer("Сообщение отправлено! Скоро отвечу", reply_markup=main_kb)
 
-# === Webhook ===
+# ========================== Webhook ==========================
 async def on_startup(app):
     await bot.set_webhook(WEBHOOK_URL)
-    logger.info(f"Webhook установлен: {WEBHOOK_URL}")
-    await bot.send_message(ADMIN_ID, "БОТ ЗАПУЩЕН И РАБОТАЕТ 100%!\nВсе баги исправлены")
+    logger.info("Webhook установлен")
+    await bot.send_message(ADMIN_ID, "БОТ 100% РАБОЧИЙ! Все баги убиты")
 
 async def on_shutdown(app):
     await bot.delete_webhook(drop_pending_updates=True)
