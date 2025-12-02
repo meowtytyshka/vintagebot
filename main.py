@@ -34,7 +34,7 @@ WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
 ADMIN_ID = int(os.getenv("ADMIN_ID", "692408588"))
 
 CATALOG_FILE = Path("catalog.json")
-PENDING_FILE = Path("pending.json")  # заявки в ожидании апрува
+PENDING_FILE = Path("pending.json")
 
 # ========================== Работа с файлами =====================
 
@@ -70,13 +70,21 @@ def next_lot_id() -> int:
 
 class Form(StatesGroup):
     photos = State()
+    photos_confirm = State()
     title = State()
+    title_confirm = State()
     year = State()
+    year_confirm = State()
     condition = State()
+    condition_confirm = State()
     size = State()
+    size_confirm = State()
     price = State()
+    price_confirm = State()
     city = State()
+    city_confirm = State()
     comment = State()
+    comment_confirm = State()
 
 class BuyAddress(StatesGroup):
     waiting = State()
@@ -102,6 +110,23 @@ cancel_kb = ReplyKeyboardMarkup(
     resize_keyboard=True,
     keyboard=[[KeyboardButton(text="/cancel")]],
 )
+
+photos_kb = ReplyKeyboardMarkup(
+    resize_keyboard=True,
+    keyboard=[
+        [KeyboardButton(text="Добавить ещё фото")],
+        [KeyboardButton(text="Дальше"), KeyboardButton(text="/cancel")],
+    ],
+)
+
+def yes_no_kb(ok_text: str, edit_text: str) -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        resize_keyboard=True,
+        keyboard=[
+            [KeyboardButton(text=ok_text), KeyboardButton(text=edit_text)],
+            [KeyboardButton(text="/cancel")],
+        ],
+    )
 
 def lot_inline_kb(lot_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -170,9 +195,11 @@ async def user_sell(m: types.Message, state: FSMContext):
     )
     await m.answer(
         "Пришли фото вещи (1–10 шт). Можно альбомом.\n"
-        "Когда закончишь — отправь любое не‑фото сообщение.",
-        reply_markup=ReplyKeyboardRemove(),
+        "Затем нажми «Дальше».",
+        reply_markup=photos_kb,
     )
+
+# ----- загрузка фото -----
 
 @dp.message(Form.photos, F.photo)
 async def handle_photos(m: types.Message, state: FSMContext):
@@ -180,64 +207,229 @@ async def handle_photos(m: types.Message, state: FSMContext):
     photos = data.get("photos", [])
     photos.append(m.photo[-1].file_id)
     await state.update_data(photos=photos)
-    await m.answer(f"Фото добавлено. Всего: {len(photos)}")
-    if len(photos) >= 10:
-        await m.answer("10 фото — максимум.")
-        await ask_title(m, state)
+    await m.answer(
+        f"Фото добавлено. Всего: {len(photos)}.\n"
+        "Можешь прислать ещё или нажать «Дальше».",
+        reply_markup=photos_kb,
+    )
 
-@dp.message(Form.photos)
-async def finish_photos(m: types.Message, state: FSMContext):
+@dp.message(Form.photos, F.text == "Добавить ещё фото")
+async def photos_more(m: types.Message, state: FSMContext):
+    await m.answer("Пришли ещё фото сообщением с картинкой.", reply_markup=photos_kb)
+
+@dp.message(Form.photos, F.text == "Дальше")
+async def photos_next(m: types.Message, state: FSMContext):
     data = await state.get_data()
     photos = data.get("photos", [])
     if not photos:
-        await m.answer("Сначала пришли хотя бы одно фото.")
+        await m.answer("Сначала пришли хотя бы одно фото.", reply_markup=photos_kb)
         return
-    await ask_title(m, state)
+    await state.set_state(Form.photos_confirm)
+    await m.answer(
+        f"Фото сохранены ({len(photos)} шт).\n"
+        "Всё верно?",
+        reply_markup=yes_no_kb("✅ Фото верные", "✏️ Загрузить заново"),
+    )
 
-async def ask_title(m: types.Message, state: FSMContext):
+@dp.message(Form.photos_confirm, F.text == "✏️ Загрузить заново")
+async def photos_reset(m: types.Message, state: FSMContext):
+    await state.update_data(photos=[])
+    await state.set_state(Form.photos)
+    await m.answer(
+        "Окей, пришли фото ещё раз (1–10 шт).",
+        reply_markup=photos_kb,
+    )
+
+@dp.message(Form.photos_confirm, F.text == "✅ Фото верные")
+async def photos_ok(m: types.Message, state: FSMContext):
     await state.set_state(Form.title)
-    await m.answer("Введи название вещи.", reply_markup=cancel_kb)
+    await m.answer(
+        "Теперь введи название вещи.",
+        reply_markup=cancel_kb,
+    )
+
+# ----- название -----
 
 @dp.message(Form.title)
 async def form_title(m: types.Message, state: FSMContext):
-    await state.update_data(title=m.text.strip())
+    title = m.text.strip()
+    await state.update_data(title=title)
+    await state.set_state(Form.title_confirm)
+    await m.answer(
+        f"Название: «{title}».\n"
+        "Если всё ок — нажми «✅ Название верное», иначе «✏️ Изменить название».",
+        reply_markup=yes_no_kb("✅ Название верное", "✏️ Изменить название"),
+    )
+
+@dp.message(Form.title_confirm, F.text == "✏️ Изменить название")
+async def title_edit(m: types.Message, state: FSMContext):
+    await state.set_state(Form.title)
+    await m.answer("Введи название ещё раз.", reply_markup=cancel_kb)
+
+@dp.message(Form.title_confirm, F.text == "✅ Название верное")
+async def title_ok(m: types.Message, state: FSMContext):
     await state.set_state(Form.year)
-    await m.answer("Год или эпоха (можно примерный).")
+    await m.answer("Теперь введи год или эпоху (можно примерный).", reply_markup=cancel_kb)
+
+# ----- год -----
 
 @dp.message(Form.year)
 async def form_year(m: types.Message, state: FSMContext):
-    await state.update_data(year=m.text.strip())
+    year = m.text.strip()
+    await state.update_data(year=year)
+    await state.set_state(Form.year_confirm)
+    await m.answer(
+        f"Год/эпоха: «{year}».\n"
+        "Нажми «✅ Год верный» или «✏️ Изменить год».",
+        reply_markup=yes_no_kb("✅ Год верный", "✏️ Изменить год"),
+    )
+
+@dp.message(Form.year_confirm, F.text == "✏️ Изменить год")
+async def year_edit(m: types.Message, state: FSMContext):
+    await state.set_state(Form.year)
+    await m.answer("Введи год или эпоху ещё раз.", reply_markup=cancel_kb)
+
+@dp.message(Form.year_confirm, F.text == "✅ Год верный")
+async def year_ok(m: types.Message, state: FSMContext):
     await state.set_state(Form.condition)
-    await m.answer("Состояние (например: отличное, есть потёртости).")
+    await m.answer(
+        "Опиши состояние вещи (например: отличное, есть потёртости).",
+        reply_markup=cancel_kb,
+    )
+
+# ----- состояние -----
 
 @dp.message(Form.condition)
 async def form_condition(m: types.Message, state: FSMContext):
-    await state.update_data(condition=m.text.strip())
+    cond = m.text.strip()
+    await state.update_data(condition=cond)
+    await state.set_state(Form.condition_confirm)
+    await m.answer(
+        f"Состояние: «{cond}».\n"
+        "Нажми «✅ Состояние верное» или «✏️ Изменить состояние».",
+        reply_markup=yes_no_kb("✅ Состояние верное", "✏️ Изменить состояние"),
+    )
+
+@dp.message(Form.condition_confirm, F.text == "✏️ Изменить состояние")
+async def condition_edit(m: types.Message, state: FSMContext):
+    await state.set_state(Form.condition)
+    await m.answer("Опиши состояние ещё раз.", reply_markup=cancel_kb)
+
+@dp.message(Form.condition_confirm, F.text == "✅ Состояние верное")
+async def condition_ok(m: types.Message, state: FSMContext):
     await state.set_state(Form.size)
-    await m.answer("Размер/габариты.")
+    await m.answer("Укажи размер или габариты.", reply_markup=cancel_kb)
+
+# ----- размер -----
 
 @dp.message(Form.size)
 async def form_size(m: types.Message, state: FSMContext):
-    await state.update_data(size=m.text.strip())
+    size = m.text.strip()
+    await state.update_data(size=size)
+    await state.set_state(Form.size_confirm)
+    await m.answer(
+        f"Размер/габариты: «{size}».\n"
+        "Нажми «✅ Размер верный» или «✏️ Изменить размер».",
+        reply_markup=yes_no_kb("✅ Размер верный", "✏️ Изменить размер"),
+    )
+
+@dp.message(Form.size_confirm, F.text == "✏️ Изменить размер")
+async def size_edit(m: types.Message, state: FSMContext):
+    await state.set_state(Form.size)
+    await m.answer("Укажи размер/габариты ещё раз.", reply_markup=cancel_kb)
+
+@dp.message(Form.size_confirm, F.text == "✅ Размер верный")
+async def size_ok(m: types.Message, state: FSMContext):
     await state.set_state(Form.price)
-    await m.answer("Цена в рублях.")
+    await m.answer("Укажи цену в рублях.", reply_markup=cancel_kb)
+
+# ----- цена -----
 
 @dp.message(Form.price)
 async def form_price(m: types.Message, state: FSMContext):
-    await state.update_data(price=m.text.strip())
+    price = m.text.strip()
+    await state.update_data(price=price)
+    await state.set_state(Form.price_confirm)
+    await m.answer(
+        f"Цена: «{price} ₽».\n"
+        "Нажми «✅ Цена верная» или «✏️ Изменить цену».",
+        reply_markup=yes_no_kb("✅ Цена верная", "✏️ Изменить цену"),
+    )
+
+@dp.message(Form.price_confirm, F.text == "✏️ Изменить цену")
+async def price_edit(m: types.Message, state: FSMContext):
+    await state.set_state(Form.price)
+    await m.answer("Укажи цену ещё раз.", reply_markup=cancel_kb)
+
+@dp.message(Form.price_confirm, F.text == "✅ Цена верная")
+async def price_ok(m: types.Message, state: FSMContext):
     await state.set_state(Form.city)
-    await m.answer("Город.")
+    await m.answer("Укажи город.", reply_markup=cancel_kb)
+
+# ----- город -----
 
 @dp.message(Form.city)
 async def form_city(m: types.Message, state: FSMContext):
-    await state.update_data(city=m.text.strip())
+    city = m.text.strip()
+    await state.update_data(city=city)
+    await state.set_state(Form.city_confirm)
+    await m.answer(
+        f"Город: «{city}».\n"
+        "Нажми «✅ Город верный» или «✏️ Изменить город».",
+        reply_markup=yes_no_kb("✅ Город верный", "✏️ Изменить город"),
+    )
+
+@dp.message(Form.city_confirm, F.text == "✏️ Изменить город")
+async def city_edit(m: types.Message, state: FSMContext):
+    await state.set_state(Form.city)
+    await m.answer("Укажи город ещё раз.", reply_markup=cancel_kb)
+
+@dp.message(Form.city_confirm, F.text == "✅ Город верный")
+async def city_ok(m: types.Message, state: FSMContext):
     await state.set_state(Form.comment)
-    await m.answer("Комментарий для покупателя (опционально).")
+    await m.answer(
+        "Добавь комментарий для покупателя (можно просто «-»).",
+        reply_markup=cancel_kb,
+    )
+
+# ----- комментарий и финальное подтверждение -----
 
 @dp.message(Form.comment)
 async def form_comment(m: types.Message, state: FSMContext):
+    comment = m.text.strip()
+    await state.update_data(comment=comment)
+    await state.set_state(Form.comment_confirm)
+
     data = await state.get_data()
-    data["comment"] = m.text.strip()
+    preview = (
+        f"Проверь карточку лота:\n\n"
+        f"Название: {data['title']}\n"
+        f"Год/эпоха: {data['year']}\n"
+        f"Состояние: {data['condition']}\n"
+        f"Размер: {data['size']}\n"
+        f"Цена: {data['price']} ₽\n"
+        f"Город: {data['city']}\n"
+        f"Комментарий: {data['comment']}\n\n"
+        f"Если всё ок — нажми «✅ Отправить на модерацию», "
+        f"если надо что‑то исправить — «✏️ Исправить поля»."
+    )
+
+    await m.answer(
+        preview,
+        reply_markup=yes_no_kb("✅ Отправить на модерацию", "✏️ Исправить поля"),
+    )
+
+@dp.message(Form.comment_confirm, F.text == "✏️ Исправить поля")
+async def comment_fix(m: types.Message, state: FSMContext):
+    await state.set_state(Form.title)
+    await m.answer(
+        "Окей, начнём правку с названия. Введи название ещё раз.",
+        reply_markup=cancel_kb,
+    )
+
+@dp.message(Form.comment_confirm, F.text == "✅ Отправить на модерацию")
+async def comment_ok(m: types.Message, state: FSMContext):
+    data = await state.get_data()
 
     pending_id = len(pending) + 1
     request_item = {
@@ -425,14 +617,20 @@ async def buy_address(m: types.Message, state: FSMContext):
 # ========================== Webhook / запуск =====================
 
 async def on_startup(app: web.Application):
-    await bot.set_webhook(WEBHOOK_URL)
-    await bot.send_message(ADMIN_ID, "БОТ ЗАПУЩЕН!")
-    logger.info(f"Webhook установлен: {WEBHOOK_URL}")
+    try:
+        await bot.set_webhook(WEBHOOK_URL)
+        await bot.send_message(ADMIN_ID, "БОТ ЗАПУЩЕН!")
+        logger.info(f"Webhook установлен: {WEBHOOK_URL}")
+    except Exception:
+        logger.exception("Ошибка в on_startup")
 
 async def on_shutdown(app: web.Application):
-    await bot.delete_webhook()
-    await bot.session.close()
-    logger.info("Бот остановлен.")
+    try:
+        await bot.delete_webhook()
+        await bot.session.close()
+        logger.info("Бот остановлен.")
+    except Exception:
+        logger.exception("Ошибка в on_shutdown")
 
 def create_app() -> web.Application:
     app = web.Application()
