@@ -1,12 +1,11 @@
 services:
-  - type: web
+  - type: web  # Обязательно web, не worker!
     name: vintage-bot
     env: python
     plan: free
-    region: oregon
     buildCommand: pip install -r requirements.txt
     startCommand: python main.py
-    rootDir: .                     # ← заставляет искать файлы в корне
+    rootDir: .
     autoDeploy: true
 
     envVars:
