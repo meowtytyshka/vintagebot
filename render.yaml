@@ -1,5 +1,5 @@
 services:
-  - type: web  # Web-сервис для webhook
+  - type: web
     name: vintage-bot
     env: python
     plan: free
