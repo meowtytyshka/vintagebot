@@ -26,7 +26,7 @@ PORT = int(os.getenv("PORT", 10000))
 BASE_URL = os.getenv("RENDER_EXTERNAL_URL", "https://vintagebot-97dr.onrender.com")
 WEBHOOK_PATH = f"/webhook/{TOKEN}"
 WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
-ADMIN_ID = int(os.getenv("ADMIN_ID", "692408588"))  # Лучше задать в переменных окружения
+ADMIN_ID = int(os.getenv("ADMIN_ID", "692408588"))
 CATALOG_FILE = Path("catalog.json")
 
 # ========================== Каталог ==========================
@@ -117,7 +117,7 @@ async def admin_photos(m: types.Message, state: FSMContext):
         return
     data = await state.get_data()
     photos = data.get("photos", [])
-    photos.append(m.photo[-1].file_id)  # Только лучшее качество
+    photos.append(m.photo[-1].file_id)
     await state.update_data(photos=photos)
     await m.answer(f"Фото добавлено. Всего: {len(photos)}")
 
@@ -155,7 +155,7 @@ async def sell_start(m: types.Message, state: FSMContext):
 @dp.message(Form.photos, F.photo)
 async def sell_photos(m: types.Message, state: FSMContext):
     data = await state.get_data()
-    photos = data.get("photos', [])
+    photos = data.get("photos", [])          # ← ИСПРАВЛЕНО: было "photos'
     photos.append(m.photo[-1].file_id)
     await state.update_data(photos=photos)
     await m.answer(f"Фото добавлено. Всего: {len(photos)}")
@@ -186,9 +186,9 @@ async def sell_size(m: types.Message, state: FSMContext):
 
 @dp.message(Form.price)
 async def sell_price(m: types.Message, state: FSMContext):
-    if not m.text.isdigit():
+    if not m.text or not m.text.strip().isdigit():
         return await m.answer("Цена должна быть числом. Попробуй ещё раз:")
-    await state.update_data(price=int(m.text))
+    await state.update_data(price=int(m.text.strip()))
     await state.set_state(Form.city)
     await m.answer("Город, где находится вещь")
 
@@ -222,7 +222,7 @@ async def sell_finish(m: types.Message, state: FSMContext):
     await m.answer("Спасибо! Заявка отправлена, скоро свяжусь лично", reply_markup=main_kb)
     await state.clear()
 
-# ========================== Неверный ввод в любом состоянии формы ==========================
+# ========================== Неверный ввод в форме ==========================
 @dp.message(StateFilter(Form))
 async def form_invalid_input(m: types.Message):
     await m.answer("Неверный формат. Пожалуйста, следуй инструкциям выше.\n"
@@ -244,7 +244,7 @@ async def show_catalog(m: types.Message):
             media.append(InputMediaPhoto(media=p))
         await m.answer_media_group(media)
         await m.answer("Нажми кнопку ниже", reply_markup=kb)
-        await asyncio.sleep(0.6)  # защита от флуда
+        await asyncio.sleep(0.6)
 
 # ========================== Покупка ==========================
 @dp.callback_query(F.data.startswith("buy_"))
@@ -286,7 +286,7 @@ async def on_startup(app):
     try:
         await bot.set_webhook(WEBHOOK_URL)
         logger.info(f"Webhook установлен: {WEBHOOK_URL}")
-        await bot.send_message(ADMIN_ID, "БОТ ЗАПУЩЕН И РАБОТАЕТ!")
+        await bot.send_message(ADMIN_ID, "БОТ ЗАПУЩЕН И ГОТОВ К РАБОТЕ!")
     except Exception as e:
         logger.error(f"Ошибка установки webhook: {e}")
 
