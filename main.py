@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command, StateFilter, ChatTypeFilter
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -49,10 +49,6 @@ def save_catalog():
 bot = Bot(token=TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
-
-# ВАЖНО: включаем работу в личных чатах (aiogram 3.x по умолчанию их блокирует)
-dp.message.filter(ChatTypeFilter(chat_type=["private"]))
-dp.callback_query.filter(ChatTypeFilter(chat_type=["private"]))
 
 # ========================== Состояния ==========================
 class Form(StatesGroup):
