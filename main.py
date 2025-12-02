@@ -3,8 +3,9 @@ import json
 import asyncio
 import logging
 from pathlib import Path
+
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command, StateFilter, ChatTypeFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -48,6 +49,10 @@ def save_catalog():
 bot = Bot(token=TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
+
+# ВАЖНО: включаем работу в личных чатах (aiogram 3.x по умолчанию их блокирует)
+dp.message.filter(ChatTypeFilter(chat_type=["private"]))
+dp.callback_query.filter(ChatTypeFilter(chat_type=["private"]))
 
 # ========================== Состояния ==========================
 class Form(StatesGroup):
@@ -155,7 +160,7 @@ async def sell_start(m: types.Message, state: FSMContext):
 @dp.message(Form.photos, F.photo)
 async def sell_photos(m: types.Message, state: FSMContext):
     data = await state.get_data()
-    photos = data.get("photos", [])          # ← ИСПРАВЛЕНО: было "photos'
+    photos = data.get("photos", [])
     photos.append(m.photo[-1].file_id)
     await state.update_data(photos=photos)
     await m.answer(f"Фото добавлено. Всего: {len(photos)}")
@@ -170,7 +175,7 @@ async def sell_title(m: types.Message, state: FSMContext):
 async def sell_year(m: types.Message, state: FSMContext):
     await state.update_data(year=m.text.strip())
     await state.set_state(Form.condition)
-    await m.answer("Состояние (например: идеальное, хорошее, с дефектами)")
+    await m.answer("Состояние (идеальное, хорошее, с дефектами и т.д.)")
 
 @dp.message(Form.condition, F.text)
 async def sell_condition(m: types.Message, state: FSMContext):
@@ -214,19 +219,18 @@ async def sell_finish(m: types.Message, state: FSMContext):
 Комментарий: {m.text.strip() or '—'}"""
 
     await bot.send_message(ADMIN_ID, text)
-    if data.get('photos'):
-        media = [InputMediaPhoto(p) for p in data['photos'][:10]]
+    if data.get("photos"):
+        media = [InputMediaPhoto(p) for p in data["photos"][:10]]
         if media:
             await bot.send_media_group(ADMIN_ID, media)
 
     await m.answer("Спасибо! Заявка отправлена, скоро свяжусь лично", reply_markup=main_kb)
     await state.clear()
 
-# ========================== Неверный ввод в форме ==========================
+# ========================== Защита от кривого ввода ==========================
 @dp.message(StateFilter(Form))
 async def form_invalid_input(m: types.Message):
-    await m.answer("Неверный формат. Пожалуйста, следуй инструкциям выше.\n"
-                   "Или нажми /cancel для отмены.")
+    await m.answer("Неверный формат. Пожалуйста, следуй инструкциям выше.\nИспользуй /cancel для выхода.")
 
 # ========================== Каталог ==========================
 @dp.message(F.text == "Актуальные лоты")
@@ -286,7 +290,7 @@ async def on_startup(app):
     try:
         await bot.set_webhook(WEBHOOK_URL)
         logger.info(f"Webhook установлен: {WEBHOOK_URL}")
-        await bot.send_message(ADMIN_ID, "БОТ ЗАПУЩЕН И ГОТОВ К РАБОТЕ!")
+        await bot.send_message(ADMIN_ID, "БОТ ЗАПУЩЕН И РАБОТАЕТ!")
     except Exception as e:
         logger.error(f"Ошибка установки webhook: {e}")
 
