@@ -1,5 +1,5 @@
 services:
-  - type: web  # Обязательно web, не worker!
+  - type: web  # Web-сервис для webhook
     name: vintage-bot
     env: python
     plan: free
@@ -7,7 +7,3 @@ services:
     startCommand: python main.py
     rootDir: .
     autoDeploy: true
-
-    envVars:
-      - key: BOT_TOKEN
-        sync: false
