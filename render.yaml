@@ -1,9 +1,18 @@
 services:
   - type: web
-    name: vintage-bot
+    name: vintage-marketplace-bot
     env: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: |
+      pip install -r requirements.txt
+      mkdir -p data logs
     startCommand: python main.py
-    rootDir: .
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_ID
+        value: "692408588"
+      - key: RENDER_EXTERNAL_URL
+        sync: false
+    healthCheckPath: /health
     autoDeploy: true
