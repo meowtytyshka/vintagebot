@@ -1,9 +1,12 @@
 import os
 import json
 import logging
+import asyncio
 from pathlib import Path
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -15,38 +18,35 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     KeyboardButton,
 )
-from aiogram.client.default import DefaultBotProperties
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ========================== ВСЕ НАСТРОЙКИ ЗДЕСЬ ======================
-TOKEN = os.getenv("BOT_TOKEN")  # Получаем из переменных окружения на Render
-ADMIN_ID = int(os.getenv("ADMIN_ID", "692408588"))  # Ваш ID
-
-# Для Render
+# ========================== Настройки ============================
+TOKEN = os.getenv("BOT_TOKEN")
 PORT = int(os.getenv("PORT", 10000))
 BASE_URL = os.getenv("RENDER_EXTERNAL_URL", "https://vintagebot-97dr.onrender.com")
 WEBHOOK_PATH = f"/webhook/{TOKEN}"
 WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
-
-# Пути к файлам
+ADMIN_ID = int(os.getenv("ADMIN_ID", "692408588"))
 CATALOG_FILE = Path("catalog.json")
 PENDING_FILE = Path("pending.json")
 
-# ========================== РАБОТА С ФАЙЛАМИ ========================
+# ========================== Работа с файлами =====================
 def load_json(path: Path) -> list[dict]:
     if path.exists():
         try:
             return json.loads(path.read_text(encoding="utf-8"))
-        except:
-            return []
+        except Exception as e:
+            logger.exception(f"Ошибка загрузки {path}: {e}")
     return []
 
 def save_json(path: Path, data: list[dict]):
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        logger.exception(f"Ошибка сохранения {path}: {e}")
 
 catalog: list[dict] = load_json(CATALOG_FILE)
 pending: list[dict] = load_json(PENDING_FILE)
@@ -62,7 +62,7 @@ def next_lot_id() -> int:
         return 1
     return max(item["id"] for item in catalog) + 1
 
-# ========================== FSM =====================================
+# ========================== FSM =================================
 class Form(StatesGroup):
     photos = State()
     title = State()
@@ -72,7 +72,7 @@ class Form(StatesGroup):
     city = State()
     price = State()
     comment = State()
-    confirm = State()
+    comment_confirm = State()
 
 class BuyAddress(StatesGroup):
     waiting = State()
@@ -80,634 +80,723 @@ class BuyAddress(StatesGroup):
 class Support(StatesGroup):
     waiting = State()
 
-# ========================== ИНИЦИАЛИЗАЦИЯ ===========================
-# ИСПРАВЛЕНО: новый способ установки parse_mode в aiogram 3.7+
-bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
+# ========================== Бот / диспетчер ======================
+bot = Bot(
+    token=TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.MARKDOWN)
+)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# ========================== КЛАВИАТУРЫ ==============================
-def get_main_keyboard():
+# ========================== Клавиатуры ===========================
+main_kb = ReplyKeyboardMarkup(
+    resize_keyboard=True,
+    keyboard=[
+        [KeyboardButton(text="🛒 Продать вещь")],
+        [KeyboardButton(text="📦 Актуальные лоты")],
+        [KeyboardButton(text="📞 Поддержка")],
+    ],
+)
+
+cancel_kb = ReplyKeyboardMarkup(
+    resize_keyboard=True,
+    keyboard=[[KeyboardButton(text="❌ Отмена")]],
+)
+
+photos_kb = ReplyKeyboardMarkup(
+    resize_keyboard=True,
+    keyboard=[
+        [KeyboardButton(text="➕ Добавить ещё фото")],
+        [KeyboardButton(text="✅ Далее"), KeyboardButton(text="❌ Отмена")],
+    ],
+)
+
+def yes_no_kb(ok_text: str, edit_text: str) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
+        resize_keyboard=True,
         keyboard=[
-            [KeyboardButton(text="🛒 Продать вещь")],
-            [KeyboardButton(text="📦 Актуальные лоты")],
-            [KeyboardButton(text="📞 Поддержка")],
+            [KeyboardButton(text=ok_text), KeyboardButton(text=edit_text)],
+            [KeyboardButton(text="❌ Отмена")],
         ],
-        resize_keyboard=True
     )
 
-def get_cancel_keyboard():
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="❌ Отмена")]],
-        resize_keyboard=True
-    )
-
-def get_photos_keyboard(photos_count):
-    buttons = []
-    if photos_count < 10:
-        buttons.append([KeyboardButton(text="➕ Добавить ещё фото")])
-    buttons.append([
-        KeyboardButton(text="✅ Далее"),
-        KeyboardButton(text="❌ Отмена")
-    ])
-    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
-
-def get_confirm_keyboard():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="✅ Отправить на модерацию"), KeyboardButton(text="✏️ Исправить")],
-            [KeyboardButton(text="❌ Отмена")]
-        ],
-        resize_keyboard=True
-    )
-
-def get_lot_keyboard(lot_id: int):
+def lot_inline_kb(lot_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🛒 Купить", callback_data=f"buy:{lot_id}")],
-            [InlineKeyboardButton(text="📋 Назад", callback_data="back_to_catalog")]
-        ]
+        ],
     )
 
-def get_catalog_keyboard():
+def catalog_menu_kb() -> InlineKeyboardMarkup:
     keyboard = []
-    for item in catalog[:10]:
+    for item in catalog[:10]:  # Максимум 10 лотов в меню
         keyboard.append([InlineKeyboardButton(
-            text=f"🖼️ {item['title'][:25]}... | {item['price']}₽",
+            text=f"🖼️ {item['title'][:30]}... | {item['price']}₽",
             callback_data=f"lot:{item['id']}"
         )])
-    keyboard.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")])
+    if len(catalog) > 10:
+        keyboard.append([InlineKeyboardButton(text="📜 Показать все", callback_data="show_all")])
+    keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_main")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-def get_admin_approve_keyboard(pending_id: int):
+def approve_kb(pending_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve:{pending_id}"),
                 InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject:{pending_id}"),
             ],
-        ]
+        ],
     )
 
-# ========================== КОМАНДЫ ================================
+# ========================== Общие команды ========================
 @dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    await message.answer(
-        "👋 <b>Добро пожаловать в винтажный маркетплейс!</b>\n\n"
-        "🛒 <b>Продать</b> — разместите свою вещь на продажу\n"
-        "📦 <b>Купить</b> — посмотрите актуальные лоты\n"
-        "📞 <b>Поддержка</b> — задайте вопрос или сообщите о проблеме\n\n"
-        "👇 Выбирайте кнопку ниже:",
-        reply_markup=get_main_keyboard()
+async def cmd_start(m: types.Message):
+    await m.answer(
+        "🎉 Добро пожаловать в винтажный маркетплейс!\n\n"
+        "🛒 *Продать* — разместите свою вещь\n"
+        "📦 *Купить* — посмотрите актуальные лоты\n"
+        "📞 *Поддержка* — вопросы и проблемы\n\n"
+        "Выбирайте кнопку ниже 👇",
+        reply_markup=main_kb,
+        parse_mode="Markdown",
     )
 
 @dp.message(F.text == "❌ Отмена")
 @dp.message(Command("cancel"))
-async def cmd_cancel(message: types.Message, state: FSMContext):
+async def cmd_cancel(m: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer("❌ Действие отменено.", reply_markup=get_main_keyboard())
+    await m.answer("Действие отменено.", reply_markup=main_kb)
 
-# ========================== ПРОДАТЬ ВЕЩЬ ==========================
+# ========================== Админ-команды ========================
+@dp.message(Command("del"))
+async def cmd_del(m: types.Message):
+    if m.from_user.id != ADMIN_ID:
+        return
+    try:
+        lot_id = int(m.text.split()[1])
+    except Exception:
+        await m.answer("Использование: /del 7")
+        return
+
+    global catalog
+    before = len(catalog)
+    catalog = [l for l in catalog if l["id"] != lot_id]
+    save_catalog()
+    if len(catalog) < before:
+        await m.answer(f"✅ Лот №{lot_id} удалён.")
+    else:
+        await m.answer("❌ Такого лота нет.")
+
+# ========================== Продать вещь =========================
 @dp.message(F.text == "🛒 Продать вещь")
-async def start_selling(message: types.Message, state: FSMContext):
+async def user_sell(m: types.Message, state: FSMContext):
     await state.set_state(Form.photos)
-    await state.update_data(photos=[], owner_id=message.from_user.id)
-    await message.answer(
-        "📸 <b>Шаг 1 из 9: Фотографии</b>\n\n"
-        "Пришлите 1-10 фото вашей вещи.\n"
-        "Можно по одной или альбомом.\n\n"
-        "Когда добавите все фото — нажмите <b>✅ Далее</b>",
-        reply_markup=get_photos_keyboard(0)
+    await state.update_data(
+        photos=[],
+        owner_id=m.from_user.id,
+        owner_username=m.from_user.username,
+    )
+    await m.answer(
+        "📸 Отправьте 1-10 фото вашей вещи\n"
+        "💡 Можно альбомом или по одной\n\n"
+        "Когда закончите — нажмите «✅ Далее»",
+        reply_markup=photos_kb,
     )
 
+# ----- загрузка фото -----
 @dp.message(Form.photos, F.photo)
-async def handle_photos(message: types.Message, state: FSMContext):
+async def handle_photos(m: types.Message, state: FSMContext):
     data = await state.get_data()
     photos = data.get("photos", [])
+    status_msg_id = data.get("status_msg_id")
     
-    if len(photos) >= 10:
-        await message.answer("⚠️ Максимум 10 фото! Нажмите <b>✅ Далее</b>", reply_markup=get_photos_keyboard(10))
+    # Обработка альбома или одного фото
+    if m.media_group_id:
+        # Альбом - сохраняем все фото с порядком по message_id
+        if "media_groups" not in data:
+            data["media_groups"] = {}
+        if m.media_group_id not in data["media_groups"]:
+            data["media_groups"][m.media_group_id] = []
+        data["media_groups"][m.media_group_id].append({
+            "file_id": m.photo[-1].file_id,
+            "message_id": m.message_id
+        })
+        await state.update_data(**data)
+        
+        # Обновляем статус после небольшой задержки, чтобы собрать все фото из альбома
+        async def update_status_after_delay():
+            await asyncio.sleep(1)  # Ждем 1 секунду для сбора всех фото из альбома
+            data = await state.get_data()
+            media_groups = data.get("media_groups", {})
+            if m.media_group_id in media_groups:
+                group_photos = media_groups[m.media_group_id]
+                # Сортируем по message_id для правильного порядка
+                sorted_group = sorted(group_photos, key=lambda x: x["message_id"])
+                current_photos = data.get("photos", [])
+                for p in sorted_group:
+                    if p["file_id"] not in current_photos and len(current_photos) < 10:
+                        current_photos.append(p["file_id"])
+                await state.update_data(photos=current_photos)
+                
+                # Обновляем статусное сообщение
+                status_msg_id = data.get("status_msg_id")
+                status_text = f"📸 Фото прикреплены\n📊 Всего: *{len(current_photos)}/10*\n\nМожно добавить ещё или нажать «✅ Далее»"
+                if status_msg_id:
+                    try:
+                        await bot.edit_message_text(
+                            chat_id=m.chat.id,
+                            message_id=status_msg_id,
+                            text=status_text,
+                            reply_markup=photos_kb,
+                            parse_mode="Markdown",
+                        )
+                    except:
+                        pass
+        
+        # Запускаем обновление статуса
+        asyncio.create_task(update_status_after_delay())
         return
+    else:
+        # Одно фото - добавляем сразу
+        if len(photos) >= 10:
+            if status_msg_id:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=m.chat.id,
+                        message_id=status_msg_id,
+                        text="⚠️ Максимум 10 фото! Нажмите «✅ Далее»",
+                        reply_markup=photos_kb,
+                    )
+                except:
+                    pass
+            else:
+                await m.answer("⚠️ Максимум 10 фото! Нажмите «✅ Далее»", reply_markup=photos_kb)
+            return
+        
+        photos.append(m.photo[-1].file_id)
+        await state.update_data(photos=photos)
     
-    photos.append(message.photo[-1].file_id)
-    await state.update_data(photos=photos)
+    # Обновляем или создаем статусное сообщение
+    status_text = f"📸 Фото прикреплены\n📊 Всего: *{len(photos)}/10*\n\nМожно добавить ещё или нажать «✅ Далее»"
     
-    await message.answer(
-        f"✅ Фото добавлено!\n"
-        f"📊 Загружено: <b>{len(photos)}/10</b>\n\n"
-        "Можно добавить ещё или нажать <b>✅ Далее</b>",
-        reply_markup=get_photos_keyboard(len(photos))
-    )
+    if status_msg_id:
+        try:
+            await bot.edit_message_text(
+                chat_id=m.chat.id,
+                message_id=status_msg_id,
+                text=status_text,
+                reply_markup=photos_kb,
+                parse_mode="Markdown",
+            )
+        except:
+            msg = await m.answer(status_text, reply_markup=photos_kb, parse_mode="Markdown")
+            await state.update_data(status_msg_id=msg.message_id)
+    else:
+        msg = await m.answer(status_text, reply_markup=photos_kb, parse_mode="Markdown")
+        await state.update_data(status_msg_id=msg.message_id)
 
 @dp.message(Form.photos, F.text == "➕ Добавить ещё фото")
-async def add_more_photos(message: types.Message):
-    await message.answer("📸 Отправьте следующее фото...")
+async def photos_more(m: types.Message, state: FSMContext):
+    await m.answer("📸 Пришлите фото!", reply_markup=photos_kb)
 
 @dp.message(Form.photos, F.text == "✅ Далее")
-async def photos_next(message: types.Message, state: FSMContext):
+async def photos_next(m: types.Message, state: FSMContext):
     data = await state.get_data()
     photos = data.get("photos", [])
     
+    # Обрабатываем медиа-группы если есть
+    if "media_groups" in data:
+        for group_id, group_photos in data["media_groups"].items():
+            # Сортируем по message_id (они идут по порядку) и добавляем в правильном порядке
+            sorted_photos = sorted(group_photos, key=lambda x: x["message_id"])
+            for p in sorted_photos:
+                if p["file_id"] not in photos and len(photos) < 10:
+                    photos.append(p["file_id"])
+        await state.update_data(photos=photos)
+        data = await state.get_data()
+        photos = data.get("photos", [])
+    
     if not photos:
-        await message.answer("❌ Нужно хотя бы одно фото!", reply_markup=get_photos_keyboard(0))
+        await m.answer("❌ Нужно хотя бы одно фото!", reply_markup=photos_kb)
         return
     
+    # Удаляем статусное сообщение если есть
+    status_msg_id = data.get("status_msg_id")
+    if status_msg_id:
+        try:
+            await bot.delete_message(chat_id=m.chat.id, message_id=status_msg_id)
+        except:
+            pass
+    
+    # Убираем промежуточное подтверждение, сразу переходим к названию
     await state.set_state(Form.title)
-    await message.answer(
-        "✏️ <b>Шаг 2 из 9: Название вещи</b>\n\n"
-        "Напишите краткое и понятное название:\n"
-        "<i>Пример: «Винтажная кожаная куртка 80-х»</i>",
-        reply_markup=get_cancel_keyboard()
-    )
+    await state.update_data(status_msg_id=None, media_groups=None)
+    await m.answer("✏️ Напишите название вещи", reply_markup=cancel_kb)
 
+
+# ----- остальные поля формы (аналогично) -----
 @dp.message(Form.title)
-async def form_title(message: types.Message, state: FSMContext):
-    await state.update_data(title=message.text.strip())
+async def form_title(m: types.Message, state: FSMContext):
+    title = m.text.strip()
+    await state.update_data(title=title)
     await state.set_state(Form.year)
-    await message.answer(
-        "🗓️ <b>Шаг 3 из 9: Год или возраст</b>\n\n"
-        "Укажите примерный год выпуска или возраст:\n"
-        "<i>Пример: «1985» или «~40 лет»</i>",
-        reply_markup=get_cancel_keyboard()
-    )
+    await m.answer("🗓️ Укажите год выпуска или возраст\nПример: «1985» или «~40 лет»", reply_markup=cancel_kb)
 
+
+# ----- год -----
 @dp.message(Form.year)
-async def form_year(message: types.Message, state: FSMContext):
-    await state.update_data(year=message.text.strip())
+async def form_year(m: types.Message, state: FSMContext):
+    year = m.text.strip()
+    await state.update_data(year=year)
     await state.set_state(Form.condition)
-    await message.answer(
-        "⭐ <b>Шаг 4 из 9: Состояние</b>\n\n"
-        "Опишите состояние вещи:\n"
-        "<i>Пример: «Отличное, мелкие потертости»</i>",
-        reply_markup=get_cancel_keyboard()
-    )
+    await m.answer("⭐ Опишите состояние вещи\nПример: «Отличное, царапин нет»", reply_markup=cancel_kb)
 
+# ----- состояние -----
 @dp.message(Form.condition)
-async def form_condition(message: types.Message, state: FSMContext):
-    await state.update_data(condition=message.text.strip())
+async def form_condition(m: types.Message, state: FSMContext):
+    cond = m.text.strip()
+    await state.update_data(condition=cond)
     await state.set_state(Form.size)
-    await message.answer(
-        "📏 <b>Шаг 5 из 9: Размер</b>\n\n"
-        "Укажите размер или габариты:\n"
-        "<i>Пример: «48 размер» или «150×80×80 см»</i>",
-        reply_markup=get_cancel_keyboard()
-    )
+    await m.answer("📏 Укажите размер (габариты)\nПример: «200×90×90 см»", reply_markup=cancel_kb)
 
+# ----- размер -----
 @dp.message(Form.size)
-async def form_size(message: types.Message, state: FSMContext):
-    await state.update_data(size=message.text.strip())
+async def form_size(m: types.Message, state: FSMContext):
+    size = m.text.strip()
+    await state.update_data(size=size)
     await state.set_state(Form.city)
-    await message.answer(
-        "📍 <b>Шаг 6 из 9: Город</b>\n\n"
-        "Где находится вещь?\n"
-        "<i>Пример: «Москва»</i>",
-        reply_markup=get_cancel_keyboard()
-    )
+    await m.answer("📍 Укажите город\nПример: «Москва»", reply_markup=cancel_kb)
 
+# ----- город -----
 @dp.message(Form.city)
-async def form_city(message: types.Message, state: FSMContext):
-    await state.update_data(city=message.text.strip())
+async def form_city(m: types.Message, state: FSMContext):
+    city = m.text.strip()
+    await state.update_data(city=city)
     await state.set_state(Form.price)
-    await message.answer(
-        "💰 <b>Шаг 7 из 9: Цена</b>\n\n"
-        "Укажите цену в рублях:\n"
-        "<i>Пример: «5000»</i>",
-        reply_markup=get_cancel_keyboard()
-    )
+    await m.answer("💰 Укажите чистую цену продажи в рублях\nПример: «5000»", reply_markup=cancel_kb)
 
+# ----- цена -----
 @dp.message(Form.price)
-async def form_price(message: types.Message, state: FSMContext):
-    await state.update_data(price=message.text.strip())
+async def form_price(m: types.Message, state: FSMContext):
+    price = m.text.strip()
+    await state.update_data(price=price)
     await state.set_state(Form.comment)
-    await message.answer(
-        "💬 <b>Шаг 8 из 9: Комментарий</b>\n\n"
-        "Добавьте дополнительную информацию (по желанию):\n"
-        "<i>Пример: «Есть оригинальные бирки»</i>\n\n"
-        "Если не нужно — напишите <b>«-»</b>",
-        reply_markup=get_cancel_keyboard()
+    await m.answer(
+        "💬 Добавьте дополнительный комментарий (по желанию)\n"
+        "Или напишите «-» если нет",
+        reply_markup=cancel_kb,
     )
 
+# ----- финальное подтверждение -----
 @dp.message(Form.comment)
-async def form_comment(message: types.Message, state: FSMContext):
-    comment = message.text.strip()
-    if comment == "-":
-        comment = "Без комментариев"
-    
+async def form_comment(m: types.Message, state: FSMContext):
+    comment = m.text.strip()
     await state.update_data(comment=comment)
-    await state.set_state(Form.confirm)
-    
+    await state.set_state(Form.comment_confirm)
+
     data = await state.get_data()
-    
-    preview = f"""
-📋 <b>ПРЕДПРОСМОТР ЗАЯВКИ</b>
+    preview = (
+        "🔍 *ПРОВЕРЬТЕ ЗАЯВКУ*\n\n"
+        f"Название: {data['title']}\n"
+        f"Год/возраст: {data['year']}\n"
+        f"Состояние: {data['condition']}\n"
+        f"Размер: {data['size']}\n"
+        f"Цена: {data['price']} ₽\n"
+        f"Город: {data['city']}\n"
+        f"Комментарий: {data['comment']}\n\n"
+        "✅ *Одобрить* — отправить на модерацию\n"
+        "✏️ *Исправить* — вернуться к началу"
+    )
+    await m.answer(preview, reply_markup=yes_no_kb("✅ Одобрить", "✏️ Исправить"), parse_mode="Markdown")
 
-<b>📸 Фото:</b> {len(data['photos'])} шт.
-<b>🏷️ Название:</b> {data['title']}
-<b>🗓️ Год:</b> {data['year']}
-<b>⭐ Состояние:</b> {data['condition']}
-<b>📏 Размер:</b> {data['size']}
-<b>📍 Город:</b> {data['city']}
-<b>💰 Цена:</b> {data['price']} ₽
-<b>💬 Комментарий:</b> {data['comment']}
-
-<b>Всё верно?</b>
-"""
-    await message.answer(preview, reply_markup=get_confirm_keyboard())
-
-@dp.message(Form.confirm, F.text == "✏️ Исправить")
-async def edit_form(message: types.Message, state: FSMContext):
+@dp.message(Form.comment_confirm, F.text == "✏️ Исправить")
+async def comment_fix(m: types.Message, state: FSMContext):
     await state.set_state(Form.title)
-    await message.answer("✏️ Начнём заново. Введите название вещи:", reply_markup=get_cancel_keyboard())
+    await m.answer("✏️ Начнём с названия. Введите заново:", reply_markup=cancel_kb)
 
-@dp.message(Form.confirm, F.text == "✅ Отправить на модерации")
-async def submit_form(message: types.Message, state: FSMContext):
+@dp.message(Form.comment_confirm, F.text == "✅ Одобрить")
+async def comment_ok(m: types.Message, state: FSMContext):
     data = await state.get_data()
-    
+    global pending
     pending_id = len(pending) + 1
-    application = {
-        "id": pending_id,
+    request_item = {
+        "pending_id": pending_id,
         "owner_id": data["owner_id"],
+        "owner_username": data["owner_username"],
         "photos": data["photos"],
         "title": data["title"],
         "year": data["year"],
         "condition": data["condition"],
         "size": data["size"],
-        "city": data["city"],
         "price": data["price"],
+        "city": data["city"],
         "comment": data["comment"],
-        "username": message.from_user.username
     }
-    
-    pending.append(application)
+    pending.append(request_item)
     save_pending()
     await state.clear()
-    
-    await message.answer(
-        "🎉 <b>Заявка отправлена на модерацию!</b>\n\n"
-        "⏳ Обычно это занимает до 24 часов.\n"
-        "Мы уведомим вас, когда лот будет опубликован.",
-        reply_markup=get_main_keyboard()
+
+    # Отправка пользователю
+    await m.answer("🎉 Заявка отправлена на модерацию!\n⏳ Скоро получите ответ.", reply_markup=main_kb)
+
+    # Отправка админу
+    caption = (
+        f"🆕 НОВАЯ ЗАЯВКА #{pending_id}\n\n"
+        f"Название: *{request_item['title']}*\n"
+        f"Год/возраст: {request_item['year']}\n"
+        f"Состояние: {request_item['condition']}\n"
+        f"Размер: {request_item['size']}\n"
+        f"Цена: {request_item['price']} ₽\n"
+        f"Город: {request_item['city']}\n"
+        f"Комментарий: {request_item['comment']}\n\n"
+        f"👤 @{request_item['owner_username']} (ID: {request_item['owner_id']})"
     )
+    media = [InputMediaPhoto(media=request_item["photos"][0], caption=caption, parse_mode="Markdown")]
+    for p in request_item["photos"][1:]:
+        media.append(InputMediaPhoto(media=p))
     
-    caption = f"""
-🆕 <b>НОВАЯ ЗАЯВКА #{pending_id}</b>
+    msgs = await bot.send_media_group(chat_id=ADMIN_ID, media=media)
+    await msgs[-1].reply(
+        f"Заявка #{pending_id}. Что делаем?",
+        reply_markup=approve_kb(pending_id),
+    )
 
-<b>🏷️ Название:</b> {application['title']}
-<b>🗓️ Год:</b> {application['year']}
-<b>⭐ Состояние:</b> {application['condition']}
-<b>📏 Размер:</b> {application['size']}
-<b>📍 Город:</b> {application['city']}
-<b>💰 Цена:</b> {application['price']} ₽
-<b>💬 Комментарий:</b> {application['comment']}
-
-<b>👤 Продавец:</b> @{application.get('username', 'нет')}
-<b>🆔 ID:</b> {application['owner_id']}
-"""
-    
-    if application['photos']:
-        media = [InputMediaPhoto(media=application['photos'][0], caption=caption)]
-        for photo in application['photos'][1:]:
-            media.append(InputMediaPhoto(media=photo))
-        
-        messages = await bot.send_media_group(chat_id=ADMIN_ID, media=media)
-        await messages[-1].reply(
-            f"Заявка #{pending_id}. Что делаем?",
-            reply_markup=get_admin_approve_keyboard(pending_id)
-        )
-
-# ========================== МОДЕРАЦИЯ =============================
+# ========================== Апрув / отклонение ===================
 @dp.callback_query(F.data.startswith("approve:"))
-async def approve_application(callback: types.CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
-        await callback.answer("🚫 Нет прав", show_alert=True)
+async def cb_approve(call: types.CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("🚫 Нет прав.", show_alert=True)
         return
-    
-    pending_id = int(callback.data.split(":")[1])
-    app = next((a for a in pending if a["id"] == pending_id), None)
-    
-    if not app:
-        await callback.answer("❌ Заявка не найдена", show_alert=True)
+
+    global pending
+    pending_id = int(call.data.split(":")[1])
+    item = next((x for x in pending if x["pending_id"] == pending_id), None)
+    if not item:
+        await call.answer("❌ Заявка не найдена.", show_alert=True)
         return
-    
+
+    global catalog
     lot_id = next_lot_id()
     lot = {
         "id": lot_id,
-        "title": app["title"],
-        "year": app["year"],
-        "condition": app["condition"],
-        "size": app["size"],
-        "city": app["city"],
-        "price": app["price"],
-        "comment": app["comment"],
-        "photos": app["photos"],
-        "owner_id": app["owner_id"],
-        "owner_username": app.get("username")
+        "photos": item["photos"],
+        "title": item["title"],
+        "year": item["year"],
+        "condition": item["condition"],
+        "size": item["size"],
+        "price": item["price"],
+        "city": item["city"],
+        "comment": item["comment"],
+        "owner_id": item["owner_id"],
     }
-    
     catalog.append(lot)
     save_catalog()
-    
-    pending[:] = [a for a in pending if a["id"] != pending_id]
+
+    pending = [x for x in pending if x["pending_id"] != pending_id]
     save_pending()
+
+    # Обновляем сообщение админу
+    try:
+        if call.message.caption:
+            new_caption = call.message.caption + f"\n\n✅ *ОПУБЛИКОВАНО* как лот №{lot_id}"
+            await call.message.edit_caption(
+                caption=new_caption,
+                parse_mode="Markdown",
+                reply_markup=None,
+            )
+        else:
+            await call.message.edit_text(
+                text=call.message.text + f"\n\n✅ *ОПУБЛИКОВАНО* как лот №{lot_id}",
+                parse_mode="Markdown",
+                reply_markup=None,
+            )
+    except Exception as e:
+        logger.exception(f"Ошибка обновления сообщения: {e}")
     
+    await call.answer("✅ Опубликовано!")
+
+    # Уведомление юзеру
     try:
         await bot.send_message(
-            app["owner_id"],
-            f"🎉 <b>Ваша заявка одобрена!</b>\n\n"
-            f"🏷️ Лот: {app['title']}\n"
-            f"💰 Цена: {app['price']} ₽\n"
-            f"🆔 Номер лота: #{lot_id}\n\n"
-            f"Теперь ваш лот виден всем в каталоге!",
-            parse_mode="HTML"
+            item["owner_id"],
+            f"🎉 Ваша заявка *одобрена*!\n\n"
+            f"🆔 Лот №{lot_id} опубликован в каталоге!",
+            parse_mode="Markdown",
         )
-    except:
-        pass
+    except Exception as e:
+        logger.exception(f"Не удалось уведомить владельца: {e}")
     
+    # Уведомление админу
     try:
-        if callback.message.caption:
-            new_caption = callback.message.caption + "\n\n✅ <b>ОПУБЛИКОВАНО</b>"
-            await callback.message.edit_caption(caption=new_caption)
-        else:
-            new_text = callback.message.text + "\n\n✅ <b>ОПУБЛИКОВАНО</b>"
-            await callback.message.edit_text(text=new_text)
-        await callback.message.edit_reply_markup(reply_markup=None)
-    except:
-        pass
-    
-    await callback.answer(f"✅ Лот #{lot_id} опубликован")
+        await bot.send_message(
+            ADMIN_ID,
+            f"✅ Заявка #{pending_id} одобрена и опубликована как лот №{lot_id}",
+        )
+    except Exception as e:
+        logger.exception(f"Ошибка отправки уведомления админу: {e}")
 
 @dp.callback_query(F.data.startswith("reject:"))
-async def reject_application(callback: types.CallbackQuery):
-    if callback.from_user.id != ADMIN_ID:
-        await callback.answer("🚫 Нет прав", show_alert=True)
+async def cb_reject(call: types.CallbackQuery):
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("🚫 Нет прав.", show_alert=True)
         return
-    
-    pending_id = int(callback.data.split(":")[1])
-    app = next((a for a in pending if a["id"] == pending_id), None)
-    
-    if not app:
-        await callback.answer("❌ Заявка не найдена", show_alert=True)
+
+    global pending
+    pending_id = int(call.data.split(":")[1])
+    item = next((x for x in pending if x["pending_id"] == pending_id), None)
+    if not item:
+        await call.answer("❌ Заявка не найдена.", show_alert=True)
         return
-    
-    pending[:] = [a for a in pending if a["id"] != pending_id]
+
+    pending = [x for x in pending if x["pending_id"] != pending_id]
     save_pending()
+
+    # Обновляем сообщение админу
+    try:
+        if call.message.caption:
+            new_caption = call.message.caption + "\n\n❌ *ОТКЛОНЕНО*"
+            await call.message.edit_caption(
+                caption=new_caption,
+                parse_mode="Markdown",
+                reply_markup=None,
+            )
+        else:
+            await call.message.edit_text(
+                text=call.message.text + "\n\n❌ *ОТКЛОНЕНО*",
+                parse_mode="Markdown",
+                reply_markup=None,
+            )
+    except Exception as e:
+        logger.exception(f"Ошибка обновления сообщения: {e}")
     
+    await call.answer("❌ Отклонено")
+
+    # Уведомление юзеру
     try:
         await bot.send_message(
-            app["owner_id"],
-            "😔 <b>Ваша заявка отклонена</b>\n\n"
-            "К сожалению, заявка не прошла модерацию.\n"
-            "Вы можете создать новую заявку с исправлениями.",
-            parse_mode="HTML"
+            item["owner_id"],
+            "😔 К сожалению, ваша заявка отклонена модератором.",
         )
-    except:
-        pass
+    except Exception as e:
+        logger.exception(f"Не удалось уведомить владельца: {e}")
     
+    # Уведомление админу
     try:
-        if callback.message.caption:
-            new_caption = callback.message.caption + "\n\n❌ <b>ОТКЛОНЕНО</b>"
-            await callback.message.edit_caption(caption=new_caption)
-        else:
-            new_text = callback.message.text + "\n\n❌ <b>ОТКЛОНЕНО</b>"
-            await callback.message.edit_text(text=new_text)
-        await callback.message.edit_reply_markup(reply_markup=None)
-    except:
-        pass
-    
-    await callback.answer("❌ Заявка отклонена")
-
-# ========================== КАТАЛОГ ================================
-@dp.message(F.text == "📦 Актуальные лоты")
-async def show_catalog(message: types.Message):
-    if not catalog:
-        await message.answer(
-            "📭 <b>Сейчас лотов нет.</b>\n\n"
-            "Обновите позже!",
-            reply_markup=get_main_keyboard()
+        await bot.send_message(
+            ADMIN_ID,
+            f"❌ Заявка #{pending_id} отклонена",
         )
+    except Exception as e:
+        logger.exception(f"Ошибка отправки уведомления админу: {e}")
+
+# ========================== Каталог ==============================
+@dp.message(F.text == "📦 Актуальные лоты")
+async def user_catalog(m: types.Message):
+    if not catalog:
+        await m.answer("📭 Сейчас лотов нет.\n\nОбновите позже!", reply_markup=main_kb)
         return
     
-    await message.answer(
-        f"📦 <b>АКТУАЛЬНЫЕ ЛОТЫ</b> ({len(catalog)} шт)\n\n"
-        "👇 Выберите интересующий лот:",
-        reply_markup=get_catalog_keyboard()
+    await m.answer(
+        f"📦 *АКТУАЛЬНЫЕ ЛОТЫ* ({len(catalog)} шт)\n\n"
+        "Выберите интересующий 👇",
+        reply_markup=catalog_menu_kb(),
+        parse_mode="Markdown",
     )
 
 @dp.callback_query(F.data.startswith("lot:"))
-async def show_lot(callback: types.CallbackQuery):
-    lot_id = int(callback.data.split(":")[1])
+async def show_lot(call: types.CallbackQuery):
+    lot_id = int(call.data.split(":")[1])
     item = next((x for x in catalog if x["id"] == lot_id), None)
-    
     if not item:
-        await callback.answer("❌ Лот удалён", show_alert=True)
+        await call.answer("❌ Лот удалён", show_alert=True)
         return
-    
+
     caption = (
-        f"🆔 <b>Лот №{item['id']}</b>\n\n"
-        f"<b>🏷️ Название:</b> {item['title']}\n"
-        f"<b>🗓️ Год/возраст:</b> {item['year']}\n"
-        f"<b>⭐ Состояние:</b> {item['condition']}\n"
-        f"<b>📏 Размер:</b> {item['size']}\n"
-        f"<b>💰 Цена:</b> <b>{item['price']} ₽</b>\n"
-        f"<b>📍 Город:</b> {item['city']}\n"
-        f"<b>💬 Комментарий:</b> {item['comment']}"
+        f"🆔 Лот №{item['id']}\n\n"
+        f"Название: *{item['title']}*\n"
+        f"Год/возраст: {item['year']}\n"
+        f"Состояние: {item['condition']}\n"
+        f"Размер: {item['size']}\n"
+        f"Цена: *{item['price']} ₽*\n"
+        f"Город: {item['city']}\n"
+        f"Комментарий: {item['comment']}"
     )
     
     try:
-        await callback.message.delete()
-    except:
-        pass
-    
-    if item['photos']:
-        media = [InputMediaPhoto(
-            media=item['photos'][0],
-            caption=caption
-        )]
+        # Отправляем медиа-группу с фото
+        media = [InputMediaPhoto(media=item["photos"][0], caption=caption, parse_mode="Markdown")]
+        for p in item["photos"][1:]:
+            media.append(InputMediaPhoto(media=p))
         
-        for photo in item['photos'][1:]:
-            media.append(InputMediaPhoto(media=photo))
+        # Удаляем старое сообщение с кнопками
+        try:
+            await call.message.delete()
+        except:
+            pass
         
-        messages = await bot.send_media_group(
-            chat_id=callback.message.chat.id,
-            media=media
-        )
-        
-        await messages[-1].reply(
-            "💡 Хотите купить этот лот?",
-            reply_markup=get_lot_keyboard(lot_id)
-        )
+        # Отправляем новое сообщение с фото и кнопкой покупки
+        msgs = await bot.send_media_group(chat_id=call.message.chat.id, media=media)
+        await msgs[-1].reply("💡 Хотите купить? Нажмите кнопку:", reply_markup=lot_inline_kb(lot_id))
+    except Exception as e:
+        logger.exception(f"Ошибка показа лота: {e}")
+        await call.answer("❌ Ошибка загрузки лота", show_alert=True)
     
-    await callback.answer()
+    await call.answer()
 
-@dp.callback_query(F.data == "back_to_catalog")
-async def back_to_catalog(callback: types.CallbackQuery):
-    await callback.message.delete()
-    await show_catalog(callback.message)
-
-@dp.callback_query(F.data == "main_menu")
-async def back_to_main(callback: types.CallbackQuery):
-    await callback.message.delete()
-    await cmd_start(callback.message)
-
-# ========================== ПОКУПКА ================================
-@dp.callback_query(F.data.startswith("buy:"))
-async def start_buying(callback: types.CallbackQuery, state: FSMContext):
-    lot_id = int(callback.data.split(":")[1])
-    item = next((x for x in catalog if x["id"] == lot_id), None)
-    
-    if not item:
-        await callback.answer("❌ Лот недоступен", show_alert=True)
+@dp.callback_query(F.data == "show_all")
+async def show_all_lots(call: types.CallbackQuery):
+    if not catalog:
+        await call.answer("📭 Лотов нет", show_alert=True)
         return
     
-    await state.set_state(BuyAddress.waiting)
-    await state.update_data(
-        lot_id=lot_id,
-        lot_title=item['title'],
-        lot_price=item['price'],
-        seller_id=item['owner_id']
-    )
+    # Показываем все лоты (если их больше 10)
+    keyboard = []
+    for item in catalog:
+        keyboard.append([InlineKeyboardButton(
+            text=f"🖼️ {item['title'][:30]}... | {item['price']}₽",
+            callback_data=f"lot:{item['id']}"
+        )])
+    keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_main")])
     
-    await callback.message.answer(
-        f"🛒 <b>ПОДТВЕРЖДЕНИЕ ПОКУПКИ</b>\n\n"
-        f"<b>🆔 Лот:</b> #{lot_id} - {item['title']}\n"
-        f"<b>💰 Цена:</b> {item['price']} ₽\n\n"
-        f"<b>📝 Напишите ваши контакты:</b>\n"
-        f"• Телефон\n"
-        f"• Telegram\n"
-        f"• Город для доставки\n\n"
-        f"<i>Пример: «+7 (999) 123-45-67, @username, Москва»</i>",
-        reply_markup=get_cancel_keyboard()
+    try:
+        await call.message.edit_text(
+            f"📦 *ВСЕ ЛОТЫ* ({len(catalog)} шт)\n\nВыберите интересующий 👇",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
+            parse_mode="Markdown",
+        )
+    except:
+        await call.message.answer(
+            f"📦 *ВСЕ ЛОТЫ* ({len(catalog)} шт)\n\nВыберите интересующий 👇",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
+            parse_mode="Markdown",
+        )
+    await call.answer()
+
+@dp.callback_query(F.data == "back_main")
+async def back_main(call: types.CallbackQuery):
+    try:
+        await call.message.delete()
+    except:
+        pass
+    await bot.send_message(
+        call.message.chat.id,
+        "🏠 Главное меню",
+        reply_markup=main_kb,
     )
-    await callback.answer()
+    await call.answer()
+
+# ========================== Покупка ==============================
+@dp.callback_query(F.data.startswith("buy:"))
+async def cb_buy(call: types.CallbackQuery, state: FSMContext):
+    lot_id = int(call.data.split(":")[1])
+    item = next((x for x in catalog if x["id"] == lot_id), None)
+    if not item:
+        await call.answer("❌ Лот недоступен", show_alert=True)
+        return
+
+    await state.set_state(BuyAddress.waiting)
+    await state.update_data(buy_lot_id=lot_id)
+    await call.message.answer(
+        f"🛒 *ПОДТВЕРЖДЕНИЕ ПОКУПКИ*\n\n"
+        f"Лот №{lot_id}: {item['title']}\n"
+        f"💰 {item['price']} ₽\n\n"
+        "📝 Напишите ваши контакты:\n"
+        "• Телефон\n"
+        "• Telegram\n"
+        "• Адрес самовывоза",
+        parse_mode="Markdown",
+    )
+    await call.answer()
 
 @dp.message(BuyAddress.waiting)
-async def process_buyer_info(message: types.Message, state: FSMContext):
-    if message.text == "❌ Отмена":
-        await state.clear()
-        await message.answer("❌ Покупка отменена", reply_markup=get_main_keyboard())
-        return
-    
+async def buy_address(m: types.Message, state: FSMContext):
     data = await state.get_data()
-    lot_id = data.get("lot_id")
-    lot_title = data.get("lot_title")
-    lot_price = data.get("lot_price")
-    seller_id = data.get("seller_id")
-    
-    buyer_info = message.text
-    
+    lot_id = data["buy_lot_id"]
+    item = next((x for x in catalog if x["id"] == lot_id), None)
+
     await bot.send_message(
         ADMIN_ID,
-        f"🛒 <b>НОВАЯ ЗАЯВКА НА ПОКУПКУ!</b>\n\n"
-        f"<b>🆔 Лот:</b> #{lot_id} - {lot_title}\n"
-        f"<b>💰 Цена:</b> {lot_price} ₽\n\n"
-        f"<b>👤 Покупатель:</b>\n"
-        f"• Имя: {message.from_user.full_name}\n"
-        f"• Username: @{message.from_user.username or 'нет'}\n"
-        f"• ID: {message.from_user.id}\n\n"
-        f"<b>📞 Контакты:</b>\n{buyer_info}\n\n"
-        f"<b>👤 Продавец:</b> ID: {seller_id}"
+        f"🛒 *НОВАЯ ЗАЯВКА НА ПОКУПКУ*\n\n"
+        f"🆔 Лот №{lot_id} ({item['title'] if item else 'UNKNOWN'})\n"
+        f"💰 {item['price'] if item else 'N/A'} ₽\n\n"
+        f"👤 @{m.from_user.username} (ID: {m.from_user.id})\n\n"
+        f"📞 *Контакты*:\n{m.text}",
+        parse_mode="Markdown",
     )
+
+    await state.clear()
+    await m.answer(
+        "✅ Заявка отправлена!\n"
+        "📨 С вами свяжется продавец в ближайшее время.",
+        reply_markup=main_kb,
+    )
+
+# ========================== Поддержка ============================
+@dp.message(F.text == "📞 Поддержка")
+async def user_support(m: types.Message, state: FSMContext):
+    await state.set_state(Support.waiting)
+    await m.answer(
+        "💬 Напишите ваш вопрос или проблему\n"
+        "📤 Перешлём администратору",
+        reply_markup=cancel_kb,
+    )
+
+@dp.message(Support.waiting, F.text != "❌ Отмена")
+async def support_message(m: types.Message, state: FSMContext):
+    if m.from_user.id == ADMIN_ID:
+        await state.clear()
+        return
     
+    # Отправляем админу
     try:
         await bot.send_message(
-            seller_id,
-            f"🎉 <b>ПОКУПКА ВАШЕГО ЛОТА!</b>\n\n"
-            f"<b>🆔 Лот:</b> #{lot_id} - {lot_title}\n"
-            f"<b>💰 Цена:</b> {lot_price} ₽\n\n"
-            f"<b>👤 Покупатель:</b>\n"
-            f"• Имя: {message.from_user.full_name}\n"
-            f"• Username: @{message.from_user.username or 'нет'}\n\n"
-            f"<b>📞 Контакты покупателя:</b>\n{buyer_info}\n\n"
-            f"<i>Свяжитесь с покупателем для уточнения деталей!</i>"
+            ADMIN_ID,
+            f"📞 *СООБЩЕНИЕ В ПОДДЕРЖКУ*\n\n"
+            f"👤 @{m.from_user.username or 'без username'} (ID: {m.from_user.id})\n\n"
+            f"{m.text}",
+            parse_mode="Markdown",
         )
-    except:
-        pass
-    
-    await message.answer(
-        "✅ <b>Заявка отправлена!</b>\n\n"
-        "📨 Продавец свяжется с вами в ближайшее время.\n"
-        "Обычно это занимает несколько часов.",
-        reply_markup=get_main_keyboard()
-    )
+        await m.answer("✅ Сообщение отправлено!\n⏳ Ожидайте ответа.", reply_markup=main_kb)
+    except Exception as e:
+        logger.exception(f"Ошибка отправки сообщения в поддержку: {e}")
+        await m.answer("❌ Ошибка отправки сообщения. Попробуйте позже.", reply_markup=main_kb)
     
     await state.clear()
 
-# ========================== ПОДДЕРЖКА ==============================
-@dp.message(F.text == "📞 Поддержка")
-async def start_support(message: types.Message, state: FSMContext):
-    await state.set_state(Support.waiting)
-    await message.answer(
-        "💬 <b>Напишите ваш вопрос или проблему</b>\n\n"
-        "Мы перешлём ваше сообщение администратору.\n"
-        "Или нажмите <b>❌ Отмена</b> для выхода.",
-        reply_markup=get_cancel_keyboard()
-    )
-
-@dp.message(Support.waiting)
-async def process_support(message: types.Message, state: FSMContext):
-    if message.text == "❌ Отмена":
-        await state.clear()
-        await message.answer("❌ Обращение отменено", reply_markup=get_main_keyboard())
-        return
-    
-    await bot.send_message(
-        ADMIN_ID,
-        f"📞 <b>СООБЩЕНИЕ В ПОДДЕРЖКУ</b>\n\n"
-        f"<b>👤 От:</b> {message.from_user.full_name}\n"
-        f"<b>📱 Username:</b> @{message.from_user.username or 'нет'}\n"
-        f"<b>🆔 ID:</b> {message.from_user.id}\n\n"
-        f"<b>💬 Сообщение:</b>\n{message.text}"
-    )
-    
-    await message.answer(
-        "✅ <b>Сообщение отправлено!</b>\n\n"
-        "⏳ Администратор получил ваше обращение\n"
-        "и ответит в ближайшее время.",
-        reply_markup=get_main_keyboard()
-    )
-    
+@dp.message(Support.waiting, F.text == "❌ Отмена")
+async def support_cancel(m: types.Message, state: FSMContext):
     await state.clear()
+    await m.answer("Действие отменено.", reply_markup=main_kb)
 
-# ========================== WEBHOOK ================================
-async def on_startup(app):
+# ========================== Webhook ==============================
+async def on_startup(app: web.Application):
     try:
         await bot.set_webhook(WEBHOOK_URL)
         await bot.send_message(ADMIN_ID, "🚀 БОТ ЗАПУЩЕН И ГОТОВ К РАБОТЕ!")
         logger.info(f"Webhook установлен: {WEBHOOK_URL}")
-    except Exception as e:
-        logger.error(f"Ошибка в on_startup: {e}")
+    except Exception:
+        logger.exception("Ошибка в on_startup")
 
-async def on_shutdown(app):
+async def on_shutdown(app: web.Application):
     try:
         await bot.delete_webhook()
         await bot.session.close()
         logger.info("Бот остановлен.")
-    except Exception as e:
-        logger.error(f"Ошибка в on_shutdown: {e}")
+    except Exception:
+        logger.exception("Ошибка в on_shutdown")
 
-def create_app():
+def create_app() -> web.Application:
     app = web.Application()
     app.on_startup.append(on_startup)
     app.on_shutdown.append(on_shutdown)
-    
     SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
     
-    async def index(request):
-        return web.Response(text="Bot is running")
-    
+    async def index(request: web.Request) -> web.Response:
+        return web.Response(text="OK")
     app.router.add_get("/", index)
-    app.router.add_get("/health", index)
     
     return app
 
 if __name__ == "__main__":
-    if not TOKEN:
-        logger.error("Не указан BOT_TOKEN!")
-        exit(1)
-    
-    web.run_app(
-        create_app(),
-        host="0.0.0.0",
-        port=PORT
-    )
+    web.run_app(create_app(), host="0.0.0.0", port=PORT)
