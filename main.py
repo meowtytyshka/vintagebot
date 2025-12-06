@@ -810,4 +810,394 @@ async def start_buying_process(callback: types.CallbackQuery, state: FSMContext)
         seller_id=lot['owner_id']
     )
     
-    await
+    await callback.message.answer(
+        f"🛒 <b>ПОДТВЕРЖДЕНИЕ ПОКУПКИ</b>\n\n"
+        f"🏷️ <b>Лот:</b> #{lot_id} - {lot['title']}\n"
+        f"💰 <b>Цена:</b> {lot['price']} ₽\n"
+        f"📍 <b>Город:</b> {lot['city']}\n\n"
+        f"<b>📝 Чтобы завершить покупку, напишите:</b>\n"
+        f"• Ваш номер телефона\n"
+        f"• Предпочтительный способ связи (Telegram/WhatsApp)\n"
+        f"• Город для доставки/самовывоза\n\n"
+        f"<i>Пример: «+7 (999) 123-45-67, Telegram, Москва, могу забрать самовывозом»</i>\n\n"
+        f"Или нажмите <b>🚫 Отмена</b>, чтобы вернуться",
+        parse_mode="HTML",
+        reply_markup=get_cancel_keyboard()
+    )
+    await callback.answer()
+
+@dp.message(BuyAddress.waiting)
+async def process_buyer_info(message: types.Message, state: FSMContext):
+    """Обработка информации от покупателя"""
+    buyer_info = message.text.strip()
+    
+    if buyer_info == "🚫 Отмена":
+        await state.clear()
+        await message.answer("❌ Покупка отменена", reply_markup=get_main_keyboard())
+        return
+    
+    data = await state.get_data()
+    lot_id = data.get("lot_id")
+    lot_title = data.get("lot_title")
+    lot_price = data.get("lot_price")
+    seller_id = data.get("seller_id")
+    
+    # Уведомляем админа
+    await bot.send_message(
+        ADMIN_ID,
+        f"🛒 <b>НОВАЯ ЗАЯВКА НА ПОКУПКУ!</b>\n\n"
+        f"<b>🏷️ Лот:</b> #{lot_id} - {lot_title}\n"
+        f"<b>💰 Цена:</b> {lot_price} ₽\n\n"
+        f"<b>👤 Покупатель:</b>\n"
+        f"• Имя: {message.from_user.full_name}\n"
+        f"• Username: @{message.from_user.username or 'нет'}\n"
+        f"• ID: {message.from_user.id}\n\n"
+        f"<b>📞 Контакты покупателя:</b>\n{buyer_info}\n\n"
+        f"<b>👤 Продавец:</b> ID: {seller_id}",
+        parse_mode="HTML"
+    )
+    
+    # Пытаемся уведомить продавца
+    try:
+        await bot.send_message(
+            seller_id,
+            f"🎉 <b>ПОКУПКА ВАШЕГО ЛОТА!</b>\n\n"
+            f"<b>🏷️ Лот:</b> #{lot_id} - {lot_title}\n"
+            f"<b>💰 Цена:</b> {lot_price} ₽\n\n"
+            f"<b>👤 Покупатель:</b>\n"
+            f"• Имя: {message.from_user.full_name}\n"
+            f"• Username: @{message.from_user.username or 'нет'}\n\n"
+            f"<b>📞 Контакты покупателя:</b>\n{buyer_info}\n\n"
+            f"<i>Свяжитесь с покупателем для уточнения деталей!</i>",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.error(f"Не удалось уведомить продавца {seller_id}: {e}")
+        await bot.send_message(
+            ADMIN_ID,
+            f"⚠️ <b>Не удалось уведомить продавца!</b>\n"
+            f"ID продавца: {seller_id}\n"
+            f"Ошибка: {str(e)}",
+            parse_mode="HTML"
+        )
+    
+    # Подтверждаем покупателю
+    await message.answer(
+        "✅ <b>Заявка на покупку отправлена!</b>\n\n"
+        "📨 Продавец свяжется с вами в ближайшее время\n"
+        "для уточнения деталей покупки.\n\n"
+        "💡 <i>Рекомендуем:\n"
+        "• Обсудить способ оплаты\n"
+        "• Уточнить детали доставки\n"
+        "• Спросить о наличии дефектов</i>",
+        parse_mode="HTML",
+        reply_markup=get_main_keyboard()
+    )
+    
+    await state.clear()
+
+# ========================== Поддержка ====================================
+@dp.message(F.text == "❓ Поддержка/Вопрос")
+async def start_support(message: types.Message, state: FSMContext):
+    """Начало диалога с поддержкой"""
+    await state.set_state(Support.waiting)
+    await message.answer(
+        "💬 <b>ОПИШИТЕ ВАШ ВОПРОС ИЛИ ПРОБЛЕМУ</b>\n\n"
+        "Напишите подробно, что произошло или какой вопрос у вас возник.\n"
+        "Мы перешлём ваше сообщение администратору.\n\n"
+        "<i>Примеры:\n"
+        "• «Не могу разместить лот, фотографии не загружаются»\n"
+        "• «Хочу уточнить правила размещения»\n"
+        "• «Нашел ошибку в описании лота»</i>\n\n"
+        "Или нажмите <b>🚫 Отмена</b> для выхода",
+        parse_mode="HTML",
+        reply_markup=get_cancel_keyboard()
+    )
+
+@dp.message(Support.waiting)
+async def process_support_message(message: types.Message, state: FSMContext):
+    """Обработка сообщения в поддержку"""
+    support_text = message.text.strip()
+    
+    if support_text == "🚫 Отмена":
+        await state.clear()
+        await message.answer("❌ Обращение отменено", reply_markup=get_main_keyboard())
+        return
+    
+    # Отправляем админу
+    await bot.send_message(
+        ADMIN_ID,
+        f"📞 <b>НОВОЕ СООБЩЕНИЕ В ПОДДЕРЖКУ</b>\n\n"
+        f"<b>👤 От:</b> {message.from_user.full_name}\n"
+        f"<b>📱 Username:</b> @{message.from_user.username or 'нет'}\n"
+        f"<b>🆔 ID:</b> {message.from_user.id}\n\n"
+        f"<b>💬 Сообщение:</b>\n{support_text}\n\n"
+        f"<i>Для ответа используйте команду /reply {message.from_user.id}</i>",
+        parse_mode="HTML"
+    )
+    
+    # Подтверждаем пользователю
+    await message.answer(
+        "✅ <b>Сообщение отправлено!</b>\n\n"
+        "⏳ Администратор получил ваше обращение\n"
+        "и ответит в ближайшее время.\n\n"
+        "📧 <i>Ответ придёт вам в этот же чат</i>",
+        parse_mode="HTML",
+        reply_markup=get_main_keyboard()
+    )
+    
+    await state.clear()
+
+# ========================== Админ команды ================================
+@dp.message(Command("admin"))
+async def admin_panel(message: types.Message):
+    """Панель администратора"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    stats_text = f"""
+<b>📊 АДМИН ПАНЕЛЬ</b>
+
+<b>📈 Статистика:</b>
+• Лотов в каталоге: {len(catalog)}
+• Заявок на модерации: {len(pending)}
+• Активных лотов: {len([lot for lot in catalog if lot.get('status') == 'active'])}
+
+<b>⚙️ Команды:</b>
+/stats — Подробная статистика
+/pending — Показать заявки на модерации
+/broadcast — Рассылка всем пользователям
+/reply [id] [текст] — Ответить пользователю
+
+<b>📦 Управление лотами:</b>
+/del [id] — Удалить лот из каталога
+/ban [id] — Заблокировать пользователя
+    """
+    
+    await message.answer(stats_text, parse_mode="HTML")
+
+@dp.message(Command("stats"))
+async def show_stats(message: types.Message):
+    """Подробная статистика"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    active_lots = [lot for lot in catalog if lot.get('status') == 'active']
+    total_views = sum(lot.get('views', 0) for lot in catalog)
+    
+    stats_text = f"""
+<b>📊 ПОДРОБНАЯ СТАТИСТИКА</b>
+
+<b>📦 Лоты:</b>
+• Всего: {len(catalog)}
+• Активные: {len(active_lots)}
+• На модерации: {len(pending)}
+
+<b>👁️ Просмотры:</b>
+• Всего: {total_views}
+• Среднее на лот: {total_views / len(catalog) if catalog else 0:.1f}
+
+<b>🏙️ По городам:</b>
+"""
+    
+    # Статистика по городам
+    cities = {}
+    for lot in catalog:
+        city = lot.get('city', 'Не указан')
+        cities[city] = cities.get(city, 0) + 1
+    
+    for city, count in sorted(cities.items(), key=lambda x: x[1], reverse=True)[:5]:
+        stats_text += f"• {city}: {count} лотов\n"
+    
+    stats_text += f"\n<b>💰 Цены:</b>"
+    if catalog:
+        prices = [lot.get('price', 0) for lot in catalog]
+        stats_text += f"""
+• Минимальная: {min(prices)} ₽
+• Максимальная: {max(prices)} ₽
+• Средняя: {sum(prices) / len(prices):.0f} ₽
+        """
+    
+    await message.answer(stats_text, parse_mode="HTML")
+
+@dp.message(Command("pending"))
+async def show_pending(message: types.Message):
+    """Показать заявки на модерации"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    if not pending:
+        await message.answer("📭 Нет заявок на модерации")
+        return
+    
+    pending_text = f"<b>📋 ЗАЯВКИ НА МОДЕРАЦИИ</b>\n\nВсего: {len(pending)}\n\n"
+    
+    for i, app in enumerate(pending[:10], 1):
+        pending_text += f"{i}. <b>#{app['id']}</b> - {app['title']}\n"
+        pending_text += f"   👤 @{app.get('owner_username', 'нет')}\n"
+        pending_text += f"   💰 {app['price']} ₽ | 📍 {app['city']}\n\n"
+    
+    if len(pending) > 10:
+        pending_text += f"\n<i>И ещё {len(pending) - 10} заявок...</i>"
+    
+    await message.answer(pending_text, parse_mode="HTML")
+
+@dp.message(Command("del"))
+async def delete_lot(message: types.Message):
+    """Удалить лот из каталога"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    try:
+        lot_id = int(message.text.split()[1])
+    except (IndexError, ValueError):
+        await message.answer("Использование: /del [номер_лота]\nПример: /del 5")
+        return
+    
+    # Ищем лот
+    lot_to_delete = None
+    for i, lot in enumerate(catalog):
+        if lot["id"] == lot_id:
+            lot_to_delete = lot
+            # Удаляем из каталога
+            catalog.pop(i)
+            save_json(CATALOG_FILE, catalog)
+            break
+    
+    if lot_to_delete:
+        # Уведомляем владельца
+        try:
+            await bot.send_message(
+                lot_to_delete["owner_id"],
+                f"⚠️ <b>ВАШ ЛОТ УДАЛЁН АДМИНИСТРАТОРОМ</b>\n\n"
+                f"🏷️ Лот: #{lot_id} - {lot_to_delete['title']}\n"
+                f"💰 Цена: {lot_to_delete['price']} ₽\n\n"
+                f"<i>Лот был удалён из каталога.\n"
+                f"Причина: нарушение правил размещения.</i>",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.error(f"Не удалось уведомить владельца лота: {e}")
+        
+        await message.answer(f"✅ Лот #{lot_id} удалён из каталога")
+    else:
+        await message.answer(f"❌ Лот #{lot_id} не найден")
+
+@dp.message(Command("reply"))
+async def reply_to_user(message: types.Message):
+    """Ответить пользователю"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    try:
+        parts = message.text.split(maxsplit=2)
+        if len(parts) < 3:
+            await message.answer("Использование: /reply [user_id] [сообщение]")
+            return
+        
+        user_id = int(parts[1])
+        reply_text = parts[2]
+        
+        # Отправляем сообщение пользователю
+        await bot.send_message(
+            user_id,
+            f"📨 <b>ОТВЕТ ОТ АДМИНИСТРАТОРА</b>\n\n"
+            f"{reply_text}\n\n"
+            f"<i>Для дальнейших вопросов используйте кнопку «Поддержка»</i>",
+            parse_mode="HTML"
+        )
+        
+        await message.answer(f"✅ Ответ отправлен пользователю ID: {user_id}")
+        
+    except ValueError:
+        await message.answer("❌ Неверный формат ID пользователя")
+    except Exception as e:
+        logger.error(f"Ошибка отправки ответа: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)}")
+
+# ========================== Webhook настройки ============================
+async def on_startup(app: web.Application):
+    """Действия при запуске бота"""
+    try:
+        # Устанавливаем webhook
+        await bot.set_webhook(
+            url=WEBHOOK_URL,
+            drop_pending_updates=True
+        )
+        
+        # Отправляем уведомление админу
+        await bot.send_message(
+            ADMIN_ID,
+            f"🚀 <b>БОТ ЗАПУЩЕН!</b>\n\n"
+            f"⏰ Время: {datetime.now().strftime('%H:%M %d.%m.%Y')}\n"
+            f"📊 Статистика:\n"
+            f"• Лотов: {len(catalog)}\n"
+            f"• Заявок: {len(pending)}\n"
+            f"🌐 Webhook: {BASE_URL}",
+            parse_mode="HTML"
+        )
+        
+        logger.info(f"Бот запущен. Webhook: {WEBHOOK_URL}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при запуске: {e}")
+
+async def on_shutdown(app: web.Application):
+    """Действия при остановке бота"""
+    logger.info("Остановка бота...")
+    
+    try:
+        # Удаляем webhook
+        await bot.delete_webhook()
+        await bot.session.close()
+        
+        # Уведомляем админа
+        await bot.send_message(
+            ADMIN_ID,
+            "🛑 <b>БОТ ОСТАНОВЛЕН</b>\n\n"
+            f"⏰ Время: {datetime.now().strftime('%H:%M %d.%m.%Y')}",
+            parse_mode="HTML"
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка при остановке: {e}")
+
+def create_app() -> web.Application:
+    """Создание aiohttp приложения"""
+    app = web.Application()
+    
+    # Регистрируем обработчики
+    SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot
+    ).register(app, path=WEBHOOK_PATH)
+    
+    # Добавляем обработчики событий
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+    
+    # Добавляем health check
+    async def health_check(request):
+        return web.Response(text="Bot is running")
+    
+    app.router.add_get("/", health_check)
+    app.router.add_get("/health", health_check)
+    
+    return app
+
+# ========================== Запуск приложения ============================
+if __name__ == "__main__":
+    # Проверяем наличие токена
+    if not TOKEN:
+        logger.error("Не указан BOT_TOKEN!")
+        exit(1)
+    
+    logger.info(f"Запуск бота на порту {PORT}")
+    
+    # Запускаем приложение
+    web.run_app(
+        create_app(),
+        host="0.0.0.0",
+        port=PORT,
+        access_log=None  # Отключаем логи aiohttp, т.к. используем свои
+    )
