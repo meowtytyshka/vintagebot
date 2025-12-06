@@ -2,6 +2,7 @@ import os
 import json
 import logging
 from pathlib import Path
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -14,18 +15,16 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     KeyboardButton,
 )
+from aiogram.client.default import DefaultBotProperties
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler
-from aiohttp import web
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ========================== Настройки ============================
-TOKEN = os.getenv("BOT_TOKEN")  # Получаем из переменных окружения
-ADMIN_ID = int(os.getenv("ADMIN_ID", "692408588"))
-CATALOG_FILE = Path("catalog.json")
-PENDING_FILE = Path("pending.json")
+# ========================== ВСЕ НАСТРОЙКИ ЗДЕСЬ ======================
+TOKEN = os.getenv("BOT_TOKEN")  # Получаем из переменных окружения на Render
+ADMIN_ID = int(os.getenv("ADMIN_ID", "692408588"))  # Ваш ID
 
 # Для Render
 PORT = int(os.getenv("PORT", 10000))
@@ -33,7 +32,11 @@ BASE_URL = os.getenv("RENDER_EXTERNAL_URL", "https://vintagebot-97dr.onrender.co
 WEBHOOK_PATH = f"/webhook/{TOKEN}"
 WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
 
-# ========================== Работа с файлами =====================
+# Пути к файлам
+CATALOG_FILE = Path("catalog.json")
+PENDING_FILE = Path("pending.json")
+
+# ========================== РАБОТА С ФАЙЛАМИ ========================
 def load_json(path: Path) -> list[dict]:
     if path.exists():
         try:
@@ -59,7 +62,7 @@ def next_lot_id() -> int:
         return 1
     return max(item["id"] for item in catalog) + 1
 
-# ========================== FSM =================================
+# ========================== FSM =====================================
 class Form(StatesGroup):
     photos = State()
     title = State()
@@ -77,12 +80,13 @@ class BuyAddress(StatesGroup):
 class Support(StatesGroup):
     waiting = State()
 
-# ========================== Инициализация ========================
-bot = Bot(token=TOKEN, parse_mode="HTML")
+# ========================== ИНИЦИАЛИЗАЦИЯ ===========================
+# ИСПРАВЛЕНО: новый способ установки parse_mode в aiogram 3.7+
+bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# ========================== Клавиатуры ==========================
+# ========================== КЛАВИАТУРЫ ==============================
 def get_main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -128,7 +132,7 @@ def get_lot_keyboard(lot_id: int):
 
 def get_catalog_keyboard():
     keyboard = []
-    for item in catalog[:10]:  # Показываем первые 10 лотов
+    for item in catalog[:10]:
         keyboard.append([InlineKeyboardButton(
             text=f"🖼️ {item['title'][:25]}... | {item['price']}₽",
             callback_data=f"lot:{item['id']}"
@@ -146,7 +150,7 @@ def get_admin_approve_keyboard(pending_id: int):
         ]
     )
 
-# ========================== Команды =============================
+# ========================== КОМАНДЫ ================================
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
@@ -164,7 +168,7 @@ async def cmd_cancel(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer("❌ Действие отменено.", reply_markup=get_main_keyboard())
 
-# ========================== Продать вещь ========================
+# ========================== ПРОДАТЬ ВЕЩЬ ==========================
 @dp.message(F.text == "🛒 Продать вещь")
 async def start_selling(message: types.Message, state: FSMContext):
     await state.set_state(Form.photos)
@@ -316,11 +320,10 @@ async def edit_form(message: types.Message, state: FSMContext):
     await state.set_state(Form.title)
     await message.answer("✏️ Начнём заново. Введите название вещи:", reply_markup=get_cancel_keyboard())
 
-@dp.message(Form.confirm, F.text == "✅ Отправить на модерацию")
+@dp.message(Form.confirm, F.text == "✅ Отправить на модерации")
 async def submit_form(message: types.Message, state: FSMContext):
     data = await state.get_data()
     
-    # Создаем заявку
     pending_id = len(pending) + 1
     application = {
         "id": pending_id,
@@ -340,7 +343,6 @@ async def submit_form(message: types.Message, state: FSMContext):
     save_pending()
     await state.clear()
     
-    # Уведомляем пользователя
     await message.answer(
         "🎉 <b>Заявка отправлена на модерацию!</b>\n\n"
         "⏳ Обычно это занимает до 24 часов.\n"
@@ -348,7 +350,6 @@ async def submit_form(message: types.Message, state: FSMContext):
         reply_markup=get_main_keyboard()
     )
     
-    # Уведомляем админа
     caption = f"""
 🆕 <b>НОВАЯ ЗАЯВКА #{pending_id}</b>
 
@@ -365,7 +366,7 @@ async def submit_form(message: types.Message, state: FSMContext):
 """
     
     if application['photos']:
-        media = [InputMediaPhoto(media=application['photos'][0], caption=caption, parse_mode="HTML")]
+        media = [InputMediaPhoto(media=application['photos'][0], caption=caption)]
         for photo in application['photos'][1:]:
             media.append(InputMediaPhoto(media=photo))
         
@@ -375,7 +376,7 @@ async def submit_form(message: types.Message, state: FSMContext):
             reply_markup=get_admin_approve_keyboard(pending_id)
         )
 
-# ========================== Модерация ============================
+# ========================== МОДЕРАЦИЯ =============================
 @dp.callback_query(F.data.startswith("approve:"))
 async def approve_application(callback: types.CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
@@ -389,7 +390,6 @@ async def approve_application(callback: types.CallbackQuery):
         await callback.answer("❌ Заявка не найдена", show_alert=True)
         return
     
-    # Создаем лот
     lot_id = next_lot_id()
     lot = {
         "id": lot_id,
@@ -408,11 +408,9 @@ async def approve_application(callback: types.CallbackQuery):
     catalog.append(lot)
     save_catalog()
     
-    # Удаляем из ожидающих
     pending[:] = [a for a in pending if a["id"] != pending_id]
     save_pending()
     
-    # Уведомляем продавца
     try:
         await bot.send_message(
             app["owner_id"],
@@ -426,12 +424,13 @@ async def approve_application(callback: types.CallbackQuery):
     except:
         pass
     
-    # Обновляем сообщение админу
     try:
-        await callback.message.edit_caption(
-            caption=callback.message.caption + "\n\n✅ <b>ОПУБЛИКОВАНО</b>",
-            parse_mode="HTML"
-        )
+        if callback.message.caption:
+            new_caption = callback.message.caption + "\n\n✅ <b>ОПУБЛИКОВАНО</b>"
+            await callback.message.edit_caption(caption=new_caption)
+        else:
+            new_text = callback.message.text + "\n\n✅ <b>ОПУБЛИКОВАНО</b>"
+            await callback.message.edit_text(text=new_text)
         await callback.message.edit_reply_markup(reply_markup=None)
     except:
         pass
@@ -451,11 +450,9 @@ async def reject_application(callback: types.CallbackQuery):
         await callback.answer("❌ Заявка не найдена", show_alert=True)
         return
     
-    # Удаляем из ожидающих
     pending[:] = [a for a in pending if a["id"] != pending_id]
     save_pending()
     
-    # Уведомляем продавца
     try:
         await bot.send_message(
             app["owner_id"],
@@ -467,19 +464,20 @@ async def reject_application(callback: types.CallbackQuery):
     except:
         pass
     
-    # Обновляем сообщение админу
     try:
-        await callback.message.edit_caption(
-            caption=callback.message.caption + "\n\n❌ <b>ОТКЛОНЕНО</b>",
-            parse_mode="HTML"
-        )
+        if callback.message.caption:
+            new_caption = callback.message.caption + "\n\n❌ <b>ОТКЛОНЕНО</b>"
+            await callback.message.edit_caption(caption=new_caption)
+        else:
+            new_text = callback.message.text + "\n\n❌ <b>ОТКЛОНЕНО</b>"
+            await callback.message.edit_text(text=new_text)
         await callback.message.edit_reply_markup(reply_markup=None)
     except:
         pass
     
     await callback.answer("❌ Заявка отклонена")
 
-# ========================== Каталог ==============================
+# ========================== КАТАЛОГ ================================
 @dp.message(F.text == "📦 Актуальные лоты")
 async def show_catalog(message: types.Message):
     if not catalog:
@@ -517,17 +515,14 @@ async def show_lot(callback: types.CallbackQuery):
     )
     
     try:
-        # Удаляем старое сообщение
         await callback.message.delete()
     except:
         pass
     
-    # Отправляем фото с описанием
     if item['photos']:
         media = [InputMediaPhoto(
             media=item['photos'][0],
-            caption=caption,
-            parse_mode="HTML"
+            caption=caption
         )]
         
         for photo in item['photos'][1:]:
@@ -538,7 +533,6 @@ async def show_lot(callback: types.CallbackQuery):
             media=media
         )
         
-        # Добавляем кнопки к последнему сообщению
         await messages[-1].reply(
             "💡 Хотите купить этот лот?",
             reply_markup=get_lot_keyboard(lot_id)
@@ -556,7 +550,7 @@ async def back_to_main(callback: types.CallbackQuery):
     await callback.message.delete()
     await cmd_start(callback.message)
 
-# ========================== Покупка ==============================
+# ========================== ПОКУПКА ================================
 @dp.callback_query(F.data.startswith("buy:"))
 async def start_buying(callback: types.CallbackQuery, state: FSMContext):
     lot_id = int(callback.data.split(":")[1])
@@ -583,7 +577,6 @@ async def start_buying(callback: types.CallbackQuery, state: FSMContext):
         f"• Telegram\n"
         f"• Город для доставки\n\n"
         f"<i>Пример: «+7 (999) 123-45-67, @username, Москва»</i>",
-        parse_mode="HTML",
         reply_markup=get_cancel_keyboard()
     )
     await callback.answer()
@@ -603,7 +596,6 @@ async def process_buyer_info(message: types.Message, state: FSMContext):
     
     buyer_info = message.text
     
-    # Отправляем админу
     await bot.send_message(
         ADMIN_ID,
         f"🛒 <b>НОВАЯ ЗАЯВКА НА ПОКУПКУ!</b>\n\n"
@@ -614,11 +606,9 @@ async def process_buyer_info(message: types.Message, state: FSMContext):
         f"• Username: @{message.from_user.username or 'нет'}\n"
         f"• ID: {message.from_user.id}\n\n"
         f"<b>📞 Контакты:</b>\n{buyer_info}\n\n"
-        f"<b>👤 Продавец:</b> ID: {seller_id}",
-        parse_mode="HTML"
+        f"<b>👤 Продавец:</b> ID: {seller_id}"
     )
     
-    # Пытаемся уведомить продавца
     try:
         await bot.send_message(
             seller_id,
@@ -629,24 +619,21 @@ async def process_buyer_info(message: types.Message, state: FSMContext):
             f"• Имя: {message.from_user.full_name}\n"
             f"• Username: @{message.from_user.username or 'нет'}\n\n"
             f"<b>📞 Контакты покупателя:</b>\n{buyer_info}\n\n"
-            f"<i>Свяжитесь с покупателем для уточнения деталей!</i>",
-            parse_mode="HTML"
+            f"<i>Свяжитесь с покупателем для уточнения деталей!</i>"
         )
     except:
         pass
     
-    # Подтверждаем покупателю
     await message.answer(
         "✅ <b>Заявка отправлена!</b>\n\n"
         "📨 Продавец свяжется с вами в ближайшее время.\n"
         "Обычно это занимает несколько часов.",
-        parse_mode="HTML",
         reply_markup=get_main_keyboard()
     )
     
     await state.clear()
 
-# ========================== Поддержка ============================
+# ========================== ПОДДЕРЖКА ==============================
 @dp.message(F.text == "📞 Поддержка")
 async def start_support(message: types.Message, state: FSMContext):
     await state.set_state(Support.waiting)
@@ -654,7 +641,6 @@ async def start_support(message: types.Message, state: FSMContext):
         "💬 <b>Напишите ваш вопрос или проблему</b>\n\n"
         "Мы перешлём ваше сообщение администратору.\n"
         "Или нажмите <b>❌ Отмена</b> для выхода.",
-        parse_mode="HTML",
         reply_markup=get_cancel_keyboard()
     )
 
@@ -665,29 +651,25 @@ async def process_support(message: types.Message, state: FSMContext):
         await message.answer("❌ Обращение отменено", reply_markup=get_main_keyboard())
         return
     
-    # Отправляем админу
     await bot.send_message(
         ADMIN_ID,
         f"📞 <b>СООБЩЕНИЕ В ПОДДЕРЖКУ</b>\n\n"
         f"<b>👤 От:</b> {message.from_user.full_name}\n"
         f"<b>📱 Username:</b> @{message.from_user.username or 'нет'}\n"
         f"<b>🆔 ID:</b> {message.from_user.id}\n\n"
-        f"<b>💬 Сообщение:</b>\n{message.text}",
-        parse_mode="HTML"
+        f"<b>💬 Сообщение:</b>\n{message.text}"
     )
     
-    # Подтверждаем пользователю
     await message.answer(
         "✅ <b>Сообщение отправлено!</b>\n\n"
         "⏳ Администратор получил ваше обращение\n"
         "и ответит в ближайшее время.",
-        parse_mode="HTML",
         reply_markup=get_main_keyboard()
     )
     
     await state.clear()
 
-# ========================== Webhook ==============================
+# ========================== WEBHOOK ================================
 async def on_startup(app):
     try:
         await bot.set_webhook(WEBHOOK_URL)
