@@ -1,3 +1,2 @@
-aiogram==3.14.1
+aiogram>=3.22.0
 aiohttp>=3.9.0
-Pillow>=10.0.0
