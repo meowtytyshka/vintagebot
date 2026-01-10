@@ -120,23 +120,53 @@ def yes_no_kb(ok_text: str, edit_text: str) -> ReplyKeyboardMarkup:
         ],
     )
 
-def lot_inline_kb(lot_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🛒 Купить", callback_data=f"buy:{lot_id}")],
-        ],
-    )
+def lot_inline_kb(lot_id: int, current_page: int = None) -> InlineKeyboardMarkup:
+    """Клавиатура для детального просмотра лота"""
+    keyboard = [[InlineKeyboardButton(text="🛒 Купить", callback_data=f"buy:{lot_id}")]]
+    
+    # Кнопки навигации если есть пагинация
+    if current_page is not None:
+        nav_buttons = []
+        if current_page > 0:
+            nav_buttons.append(InlineKeyboardButton(text="◀️ Предыдущий", callback_data=f"page:{current_page-1}"))
+        if current_page < len(catalog) - 1:
+            nav_buttons.append(InlineKeyboardButton(text="Следующий ▶️", callback_data=f"page:{current_page+1}"))
+        if nav_buttons:
+            keyboard.append(nav_buttons)
+    
+    keyboard.append([InlineKeyboardButton(text="📦 К каталогу", callback_data="catalog:0")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
-def catalog_menu_kb() -> InlineKeyboardMarkup:
+def catalog_menu_kb(page: int = 0, items_per_page: int = 1) -> InlineKeyboardMarkup:
+    """Создает клавиатуру для галереи лотов с пагинацией"""
     keyboard = []
-    for item in catalog[:10]:  # Максимум 10 лотов в меню
+    
+    # Кнопки навигации
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"page:{page-1}"))
+    
+    if (page + 1) * items_per_page < len(catalog):
+        nav_buttons.append(InlineKeyboardButton(text="Вперед ▶️", callback_data=f"page:{page+1}"))
+    
+    if nav_buttons:
+        keyboard.append(nav_buttons)
+    
+    # Кнопка просмотра текущего лота
+    if catalog:
+        current_item = catalog[min(page * items_per_page, len(catalog) - 1)]
         keyboard.append([InlineKeyboardButton(
-            text=f"🖼️ {item['title'][:30]}... | {item['price']}₽",
-            callback_data=f"lot:{item['id']}"
+            text="👁️ Посмотреть", 
+            callback_data=f"lot:{current_item['id']}"
         )])
-    if len(catalog) > 10:
-        keyboard.append([InlineKeyboardButton(text="📜 Показать все", callback_data="show_all")])
-    keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_main")])
+    
+    # Кнопки фильтра и поиска
+    keyboard.append([
+        InlineKeyboardButton(text="🎯 Фильтр", callback_data="filter_menu"),
+        InlineKeyboardButton(text="🔍 Поиск", callback_data="search_menu")
+    ])
+    
+    keyboard.append([InlineKeyboardButton(text="🔙 Главное меню", callback_data="back_main")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 def approve_kb(pending_id: int) -> InlineKeyboardMarkup:
@@ -597,12 +627,47 @@ async def user_catalog(m: types.Message):
         await m.answer("📭 Сейчас лотов нет.\n\nОбновите позже!", reply_markup=main_kb)
         return
     
-    await m.answer(
-        f"📦 *АКТУАЛЬНЫЕ ЛОТЫ* ({len(catalog)} шт)\n\n"
-        "Выберите интересующий 👇",
-        reply_markup=catalog_menu_kb(),
-        parse_mode="Markdown",
+    # Показываем первый лот как карточку
+    await show_catalog_page(m.chat.id, 0)
+
+async def show_catalog_page(chat_id: int, page: int):
+    """Показывает страницу каталога с лотом"""
+    if not catalog or page < 0 or page >= len(catalog):
+        return
+    
+    item = catalog[page]
+    
+    # Формируем красивое описание карточки
+    caption = (
+        f"📦 *ВИНТАЖНАЯ ГАЛЕРЕЯ*\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"*{item['title'].upper()}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📅 {item['year']}\n"
+        f"⭐ {item['condition']}\n"
+        f"📏 {item['size']}\n"
+        f"📍 {item['city']}\n\n"
+        f"💰 *{item['price']} ₽*\n\n"
     )
+    
+    if item.get('comment') and item['comment'] != '-':
+        caption += f"💬 {item['comment']}\n\n"
+    
+    caption += f"📄 Страница {page + 1} из {len(catalog)}"
+    
+    # Отправляем фото с описанием
+    try:
+        media = [InputMediaPhoto(media=item["photos"][0], caption=caption, parse_mode="Markdown")]
+        for p in item["photos"][1:]:
+            media.append(InputMediaPhoto(media=p))
+        
+        msgs = await bot.send_media_group(chat_id=chat_id, media=media)
+        await msgs[-1].reply(
+            "👇 Выберите действие:",
+            reply_markup=catalog_menu_kb(page=page)
+        )
+    except Exception as e:
+        logger.exception(f"Ошибка отправки карточки лота: {e}")
 
 @dp.callback_query(F.data.startswith("lot:"))
 async def show_lot(call: types.CallbackQuery):
@@ -612,65 +677,193 @@ async def show_lot(call: types.CallbackQuery):
         await call.answer("❌ Лот удалён", show_alert=True)
         return
 
+    # Находим индекс текущего лота для пагинации
+    current_page = next((i for i, x in enumerate(catalog) if x["id"] == lot_id), 0)
+
+    # Красивое оформление детальной карточки
     caption = (
-        f"🆔 Лот №{item['id']}\n\n"
-        f"Название: *{item['title']}*\n"
-        f"Год/возраст: {item['year']}\n"
-        f"Состояние: {item['condition']}\n"
-        f"Размер: {item['size']}\n"
-        f"Цена: *{item['price']} ₽*\n"
-        f"Город: {item['city']}\n"
-        f"Комментарий: {item['comment']}"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"*{item['title'].upper()}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"📅 *Год/возраст:* {item['year']}\n"
+        f"⭐ *Состояние:* {item['condition']}\n"
+        f"📏 *Размер:* {item['size']}\n"
+        f"📍 *Город:* {item['city']}\n\n"
+        f"💰 *{item['price']} ₽*\n\n"
     )
     
+    if item.get('comment') and item['comment'] != '-':
+        caption += f"💬 *Описание:*\n{item['comment']}\n\n"
+    
+    caption += f"🆔 Лот №{item['id']}"
+    
     try:
-        # Отправляем медиа-группу с фото
-        media = [InputMediaPhoto(media=item["photos"][0], caption=caption, parse_mode="Markdown")]
-        for p in item["photos"][1:]:
-            media.append(InputMediaPhoto(media=p))
-        
-        # Удаляем старое сообщение с кнопками
+        # Удаляем старое сообщение
         try:
             await call.message.delete()
         except:
             pass
         
-        # Отправляем новое сообщение с фото и кнопкой покупки
+        # Отправляем медиа-группу с фото
+        media = [InputMediaPhoto(media=item["photos"][0], caption=caption, parse_mode="Markdown")]
+        for p in item["photos"][1:]:
+            media.append(InputMediaPhoto(media=p))
+        
         msgs = await bot.send_media_group(chat_id=call.message.chat.id, media=media)
-        await msgs[-1].reply("💡 Хотите купить? Нажмите кнопку:", reply_markup=lot_inline_kb(lot_id))
+        await msgs[-1].reply(
+            "💡 Выберите действие:",
+            reply_markup=lot_inline_kb(lot_id, current_page=current_page)
+        )
     except Exception as e:
         logger.exception(f"Ошибка показа лота: {e}")
         await call.answer("❌ Ошибка загрузки лота", show_alert=True)
     
     await call.answer()
 
-@dp.callback_query(F.data == "show_all")
-async def show_all_lots(call: types.CallbackQuery):
-    if not catalog:
-        await call.answer("📭 Лотов нет", show_alert=True)
+@dp.callback_query(F.data.startswith("page:"))
+async def show_page(call: types.CallbackQuery):
+    """Обработка пагинации каталога"""
+    page = int(call.data.split(":")[1])
+    
+    if page < 0 or page >= len(catalog):
+        await call.answer("❌ Страница не найдена", show_alert=True)
         return
     
-    # Показываем все лоты (если их больше 10)
-    keyboard = []
-    for item in catalog:
-        keyboard.append([InlineKeyboardButton(
-            text=f"🖼️ {item['title'][:30]}... | {item['price']}₽",
-            callback_data=f"lot:{item['id']}"
-        )])
-    keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_main")])
+    try:
+        # Удаляем старое сообщение
+        await call.message.delete()
+    except:
+        pass
+    
+    await show_catalog_page(call.message.chat.id, page)
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("catalog:"))
+async def back_to_catalog(call: types.CallbackQuery):
+    """Возврат к каталогу"""
+    page = int(call.data.split(":")[1])
+    
+    try:
+        await call.message.delete()
+    except:
+        pass
+    
+    await show_catalog_page(call.message.chat.id, page)
+    await call.answer()
+
+@dp.callback_query(F.data == "filter_menu")
+async def filter_menu(call: types.CallbackQuery):
+    """Меню фильтров"""
+    keyboard = [
+        [InlineKeyboardButton(text="📍 По городу", callback_data="filter:city")],
+        [InlineKeyboardButton(text="💰 По цене", callback_data="filter:price")],
+        [InlineKeyboardButton(text="📅 По году", callback_data="filter:year")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="catalog:0")]
+    ]
     
     try:
         await call.message.edit_text(
-            f"📦 *ВСЕ ЛОТЫ* ({len(catalog)} шт)\n\nВыберите интересующий 👇",
+            "🎯 *ФИЛЬТРЫ*\n\nВыберите параметр для фильтрации:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
-            parse_mode="Markdown",
+            parse_mode="Markdown"
         )
     except:
         await call.message.answer(
-            f"📦 *ВСЕ ЛОТЫ* ({len(catalog)} шт)\n\nВыберите интересующий 👇",
+            "🎯 *ФИЛЬТРЫ*\n\nВыберите параметр для фильтрации:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
-            parse_mode="Markdown",
+            parse_mode="Markdown"
         )
+    await call.answer()
+
+@dp.callback_query(F.data == "search_menu")
+async def search_menu(call: types.CallbackQuery):
+    """Меню поиска"""
+    await call.answer(
+        "🔍 Функция поиска будет добавлена в следующем обновлении!\n"
+        "Пока используйте фильтры или просматривайте каталог.",
+        show_alert=True
+    )
+
+@dp.callback_query(F.data.startswith("filter:"))
+async def handle_filter(call: types.CallbackQuery):
+    """Обработка фильтров"""
+    filter_type = call.data.split(":")[1]
+    
+    if filter_type == "city":
+        # Получаем список уникальных городов
+        cities = sorted(set(item['city'] for item in catalog))
+        keyboard = []
+        for city in cities[:10]:  # Максимум 10 городов
+            keyboard.append([InlineKeyboardButton(
+                text=f"📍 {city}",
+                callback_data=f"filter_city:{city}"
+            )])
+        keyboard.append([InlineKeyboardButton(text="🔙 Назад", callback_data="filter_menu")])
+        
+        await call.message.edit_text(
+            "📍 *ФИЛЬТР ПО ГОРОДУ*\n\nВыберите город:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
+            parse_mode="Markdown"
+        )
+    elif filter_type == "price":
+        keyboard = [
+            [InlineKeyboardButton(text="💰 До 5000₽", callback_data="filter_price:0:5000")],
+            [InlineKeyboardButton(text="💰 5000-10000₽", callback_data="filter_price:5000:10000")],
+            [InlineKeyboardButton(text="💰 10000-20000₽", callback_data="filter_price:10000:20000")],
+            [InlineKeyboardButton(text="💰 От 20000₽", callback_data="filter_price:20000:999999")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="filter_menu")]
+        ]
+        await call.message.edit_text(
+            "💰 *ФИЛЬТР ПО ЦЕНЕ*\n\nВыберите диапазон:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
+            parse_mode="Markdown"
+        )
+    elif filter_type == "year":
+        await call.answer(
+            "📅 Фильтр по году будет добавлен в следующем обновлении!",
+            show_alert=True
+        )
+    
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("filter_city:"))
+async def apply_city_filter(call: types.CallbackQuery):
+    """Применение фильтра по городу"""
+    city = call.data.split(":", 1)[1]
+    filtered = [i for i, item in enumerate(catalog) if item['city'] == city]
+    
+    if not filtered:
+        await call.answer(f"❌ Лотов в городе {city} не найдено", show_alert=True)
+        return
+    
+    # Показываем первый отфильтрованный лот
+    await call.message.delete()
+    await show_catalog_page(call.message.chat.id, filtered[0])
+    await call.answer()
+
+@dp.callback_query(F.data.startswith("filter_price:"))
+async def apply_price_filter(call: types.CallbackQuery):
+    """Применение фильтра по цене"""
+    _, min_price, max_price = call.data.split(":")
+    min_price = int(min_price)
+    max_price = int(max_price)
+    
+    filtered = []
+    for i, item in enumerate(catalog):
+        try:
+            price = int(''.join(filter(str.isdigit, str(item['price']))))
+            if min_price <= price <= max_price:
+                filtered.append(i)
+        except:
+            continue
+    
+    if not filtered:
+        await call.answer("❌ Лотов в этом диапазоне цен не найдено", show_alert=True)
+        return
+    
+    # Показываем первый отфильтрованный лот
+    await call.message.delete()
+    await show_catalog_page(call.message.chat.id, filtered[0])
     await call.answer()
 
 @dp.callback_query(F.data == "back_main")
@@ -681,8 +874,9 @@ async def back_main(call: types.CallbackQuery):
         pass
     await bot.send_message(
         call.message.chat.id,
-        "🏠 Главное меню",
+        "🏠 *Главное меню*",
         reply_markup=main_kb,
+        parse_mode="Markdown"
     )
     await call.answer()
 
