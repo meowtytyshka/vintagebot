@@ -80,6 +80,9 @@ class BuyAddress(StatesGroup):
 class Support(StatesGroup):
     waiting = State()
 
+class SearchState(StatesGroup):
+    waiting = State()
+
 # ========================== Бот / диспетчер ======================
 bot = Bot(
     token=TOKEN,
@@ -160,11 +163,18 @@ def catalog_menu_kb(page: int = 0, items_per_page: int = 1) -> InlineKeyboardMar
             callback_data=f"lot:{current_item['id']}"
         )])
     
-    # Кнопки фильтра и поиска
+    # Кнопки фильтра, поиска и списка
     keyboard.append([
         InlineKeyboardButton(text="🎯 Фильтр", callback_data="filter_menu"),
         InlineKeyboardButton(text="🔍 Поиск", callback_data="search_menu")
     ])
+    
+    # Кнопка списка всех лотов
+    if len(catalog) > 1:
+        keyboard.append([InlineKeyboardButton(
+            text="📋 Список всех лотов", 
+            callback_data="list_all"
+        )])
     
     keyboard.append([InlineKeyboardButton(text="🔙 Главное меню", callback_data="back_main")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -776,13 +786,115 @@ async def filter_menu(call: types.CallbackQuery):
     await call.answer()
 
 @dp.callback_query(F.data == "search_menu")
-async def search_menu(call: types.CallbackQuery):
+async def search_menu(call: types.CallbackQuery, state: FSMContext):
     """Меню поиска"""
-    await call.answer(
-        "🔍 Функция поиска будет добавлена в следующем обновлении!\n"
-        "Пока используйте фильтры или просматривайте каталог.",
-        show_alert=True
+    await state.set_state(SearchState.waiting)
+    
+    try:
+        await call.message.edit_text(
+            "🔍 *ПОИСК ПО КАТАЛОГУ*\n\n"
+            "Введите название или ключевое слово для поиска:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_search")]]
+            )
+        )
+    except:
+        await call.message.answer(
+            "🔍 *ПОИСК ПО КАТАЛОГУ*\n\n"
+            "Введите название или ключевое слово для поиска:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_search")]]
+            )
+        )
+    await call.answer()
+
+@dp.callback_query(F.data == "cancel_search")
+async def cancel_search(call: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    try:
+        await call.message.delete()
+    except:
+        pass
+    await call.answer("Поиск отменён")
+
+@dp.message(SearchState.waiting)
+async def handle_search(m: types.Message, state: FSMContext):
+    """Обработка поискового запроса"""
+    # Проверяем отмену
+    if m.text == "❌ Отмена":
+        await state.clear()
+        await m.answer("Поиск отменён.", reply_markup=main_kb)
+        return
+    
+    search_query = m.text.lower().strip()
+    
+    if not search_query:
+        await m.answer("❌ Введите поисковый запрос.", reply_markup=main_kb)
+        await state.clear()
+        return
+    
+    # Поиск по названию, году, состоянию, городу
+    found = []
+    for i, item in enumerate(catalog):
+        if (search_query in item['title'].lower() or
+            search_query in str(item['year']).lower() or
+            search_query in item['condition'].lower() or
+            search_query in item['city'].lower() or
+            (item.get('comment') and search_query in item['comment'].lower())):
+            found.append(i)
+    
+    if not found:
+        await m.answer(
+            f"❌ По запросу «{m.text}» ничего не найдено.\n\n"
+            "Попробуйте другой запрос или используйте фильтры.",
+            reply_markup=main_kb
+        )
+        await state.clear()
+        return
+    
+    # Показываем первый найденный лот
+    await show_catalog_page(m.chat.id, found[0])
+    await m.answer(
+        f"✅ Найдено лотов: {len(found)}\n"
+        f"Показан первый результат. Используйте навигацию для просмотра остальных.",
+        reply_markup=main_kb
     )
+    await state.clear()
+
+@dp.callback_query(F.data == "list_all")
+async def list_all_lots(call: types.CallbackQuery):
+    """Показать список всех лотов"""
+    if not catalog:
+        await call.answer("📭 Лотов нет", show_alert=True)
+        return
+    
+    # Создаем список лотов (максимум 50)
+    keyboard = []
+    for item in catalog[:50]:
+        keyboard.append([InlineKeyboardButton(
+            text=f"{item['title'][:35]}... | {item['price']}₽",
+            callback_data=f"lot:{item['id']}"
+        )])
+    
+    keyboard.append([InlineKeyboardButton(text="🔙 К каталогу", callback_data="catalog:0")])
+    
+    try:
+        await call.message.edit_text(
+            f"📋 *СПИСОК ВСЕХ ЛОТОВ* ({len(catalog)} шт)\n\n"
+            "Выберите лот для просмотра:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
+            parse_mode="Markdown"
+        )
+    except:
+        await call.message.answer(
+            f"📋 *СПИСОК ВСЕХ ЛОТОВ* ({len(catalog)} шт)\n\n"
+            "Выберите лот для просмотра:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=keyboard),
+            parse_mode="Markdown"
+        )
+    await call.answer()
 
 @dp.callback_query(F.data.startswith("filter:"))
 async def handle_filter(call: types.CallbackQuery):
@@ -862,9 +974,37 @@ async def apply_price_filter(call: types.CallbackQuery):
         return
     
     # Показываем первый отфильтрованный лот
-    await call.message.delete()
+    try:
+        await call.message.delete()
+    except:
+        pass
     await show_catalog_page(call.message.chat.id, filtered[0])
     await call.answer()
+
+@dp.callback_query(F.data.startswith("sold:"))
+async def mark_as_sold(call: types.CallbackQuery):
+    """Пометить лот как проданный и удалить из каталога"""
+    if call.from_user.id != ADMIN_ID:
+        await call.answer("🚫 Нет прав.", show_alert=True)
+        return
+    
+    lot_id = int(call.data.split(":")[1])
+    global catalog
+    
+    # Удаляем лот из каталога
+    before = len(catalog)
+    catalog = [l for l in catalog if l["id"] != lot_id]
+    save_catalog()
+    
+    if len(catalog) < before:
+        await call.message.edit_text(
+            call.message.text + f"\n\n✅ *ЛОТ ПРОДАН И УДАЛЁН ИЗ КАТАЛОГА*",
+            parse_mode="Markdown",
+            reply_markup=None,
+        )
+        await call.answer("✅ Лот удалён из каталога")
+    else:
+        await call.answer("❌ Лот не найден", show_alert=True)
 
 @dp.callback_query(F.data == "back_main")
 async def back_main(call: types.CallbackQuery):
@@ -900,23 +1040,38 @@ async def cb_buy(call: types.CallbackQuery, state: FSMContext):
         "• Telegram\n"
         "• Адрес самовывоза",
         parse_mode="Markdown",
+        reply_markup=cancel_kb,
     )
     await call.answer()
 
 @dp.message(BuyAddress.waiting)
 async def buy_address(m: types.Message, state: FSMContext):
+    # Проверяем отмену
+    if m.text == "❌ Отмена":
+        await state.clear()
+        await m.answer("Действие отменено.", reply_markup=main_kb)
+        return
+    
     data = await state.get_data()
     lot_id = data["buy_lot_id"]
     item = next((x for x in catalog if x["id"] == lot_id), None)
+
+    # Клавиатура для админа с кнопкой удаления лота
+    admin_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Продано (удалить лот)", callback_data=f"sold:{lot_id}")],
+        ]
+    )
 
     await bot.send_message(
         ADMIN_ID,
         f"🛒 *НОВАЯ ЗАЯВКА НА ПОКУПКУ*\n\n"
         f"🆔 Лот №{lot_id} ({item['title'] if item else 'UNKNOWN'})\n"
         f"💰 {item['price'] if item else 'N/A'} ₽\n\n"
-        f"👤 @{m.from_user.username} (ID: {m.from_user.id})\n\n"
+        f"👤 @{m.from_user.username or 'без username'} (ID: {m.from_user.id})\n\n"
         f"📞 *Контакты*:\n{m.text}",
         parse_mode="Markdown",
+        reply_markup=admin_kb,
     )
 
     await state.clear()
@@ -936,8 +1091,14 @@ async def user_support(m: types.Message, state: FSMContext):
         reply_markup=cancel_kb,
     )
 
-@dp.message(Support.waiting, F.text != "❌ Отмена")
+@dp.message(Support.waiting)
 async def support_message(m: types.Message, state: FSMContext):
+    # Проверяем отмену первым делом
+    if m.text == "❌ Отмена":
+        await state.clear()
+        await m.answer("Действие отменено.", reply_markup=main_kb)
+        return
+    
     if m.from_user.id == ADMIN_ID:
         await state.clear()
         return
@@ -958,10 +1119,6 @@ async def support_message(m: types.Message, state: FSMContext):
     
     await state.clear()
 
-@dp.message(Support.waiting, F.text == "❌ Отмена")
-async def support_cancel(m: types.Message, state: FSMContext):
-    await state.clear()
-    await m.answer("Действие отменено.", reply_markup=main_kb)
 
 # ========================== Webhook ==============================
 async def on_startup(app: web.Application):
