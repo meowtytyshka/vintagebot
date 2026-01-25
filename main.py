@@ -35,26 +35,75 @@ PENDING_FILE = Path("pending.json")
 
 # ========================== Работа с файлами =====================
 def load_json(path: Path) -> list[dict]:
+    """Загружает данные из JSON файла, создает файл если его нет"""
     if path.exists():
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8"))
+            logger.info(f"Загружено {len(data)} записей из {path}")
+            return data
         except Exception as e:
             logger.exception(f"Ошибка загрузки {path}: {e}")
+            # Если файл поврежден, создаем новый
+            logger.info(f"Создаю новый файл {path} из-за ошибки")
+            save_json(path, [])
+            return []
+    else:
+        logger.info(f"Файл {path} не существует, создаю новый")
+        save_json(path, [])
     return []
 
 def save_json(path: Path, data: list[dict]):
+    """Сохраняет данные в JSON файл"""
     try:
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.info(f"Сохранено {len(data)} записей в {path}")
     except Exception as e:
         logger.exception(f"Ошибка сохранения {path}: {e}")
 
+# Инициализация файлов при импорте модуля
+def init_json_files():
+    """Инициализирует JSON файлы, создает их если не существуют"""
+    logger.info("Проверка и инициализация JSON файлов...")
+    
+    # Проверяем и создаем catalog.json
+    if not CATALOG_FILE.exists():
+        logger.info(f"Создаю файл {CATALOG_FILE}")
+        save_json(CATALOG_FILE, [])
+    else:
+        logger.info(f"Файл {CATALOG_FILE} существует")
+    
+    # Проверяем и создаем pending.json
+    if not PENDING_FILE.exists():
+        logger.info(f"Создаю файл {PENDING_FILE}")
+        save_json(PENDING_FILE, [])
+    else:
+        logger.info(f"Файл {PENDING_FILE} существует")
+
+# Инициализируем файлы при загрузке модуля
+init_json_files()
+
+# Загружаем данные при старте
 catalog: list[dict] = load_json(CATALOG_FILE)
 pending: list[dict] = load_json(PENDING_FILE)
 
+def reload_catalog():
+    """Перезагружает каталог из файла"""
+    global catalog
+    catalog = load_json(CATALOG_FILE)
+    return catalog
+
+def reload_pending():
+    """Перезагружает pending из файла"""
+    global pending
+    pending = load_json(PENDING_FILE)
+    return pending
+
 def save_catalog():
+    """Сохраняет каталог в файл"""
     save_json(CATALOG_FILE, catalog)
 
 def save_pending():
+    """Сохраняет pending в файл"""
     save_json(PENDING_FILE, pending)
 
 def next_lot_id() -> int:
@@ -202,7 +251,6 @@ async def cmd_start(m: types.Message):
         parse_mode="Markdown",
     )
 
-@dp.message(F.text == "❌ Отмена")
 @dp.message(Command("cancel"))
 async def cmd_cancel(m: types.Message, state: FSMContext):
     await state.clear()
@@ -219,7 +267,10 @@ async def cmd_del(m: types.Message):
         await m.answer("Использование: /del 7")
         return
 
+    # Перезагружаем каталог из файла
     global catalog
+    catalog = reload_catalog()
+    
     before = len(catalog)
     catalog = [l for l in catalog if l["id"] != lot_id]
     save_catalog()
@@ -509,14 +560,17 @@ async def cb_approve(call: types.CallbackQuery):
         await call.answer("🚫 Нет прав.", show_alert=True)
         return
 
-    global pending
+    # Перезагружаем данные из файлов
+    global pending, catalog
+    pending = reload_pending()
+    catalog = reload_catalog()
+    
     pending_id = int(call.data.split(":")[1])
     item = next((x for x in pending if x["pending_id"] == pending_id), None)
     if not item:
         await call.answer("❌ Заявка не найдена.", show_alert=True)
         return
 
-    global catalog
     lot_id = next_lot_id()
     lot = {
         "id": lot_id,
@@ -582,7 +636,10 @@ async def cb_reject(call: types.CallbackQuery):
         await call.answer("🚫 Нет прав.", show_alert=True)
         return
 
+    # Перезагружаем данные из файла
     global pending
+    pending = reload_pending()
+    
     pending_id = int(call.data.split(":")[1])
     item = next((x for x in pending if x["pending_id"] == pending_id), None)
     if not item:
@@ -633,6 +690,9 @@ async def cb_reject(call: types.CallbackQuery):
 # ========================== Каталог ==============================
 @dp.message(F.text == "📦 Актуальные лоты")
 async def user_catalog(m: types.Message):
+    # Перезагружаем каталог из файла
+    reload_catalog()
+    
     if not catalog:
         await m.answer("📭 Сейчас лотов нет.\n\nОбновите позже!", reply_markup=main_kb)
         return
@@ -642,6 +702,10 @@ async def user_catalog(m: types.Message):
 
 async def show_catalog_page(chat_id: int, page: int):
     """Показывает страницу каталога с лотом"""
+    # Перезагружаем каталог из файла перед показом
+    global catalog
+    catalog = reload_catalog()
+    
     if not catalog or page < 0 or page >= len(catalog):
         return
     
@@ -681,6 +745,10 @@ async def show_catalog_page(chat_id: int, page: int):
 
 @dp.callback_query(F.data.startswith("lot:"))
 async def show_lot(call: types.CallbackQuery):
+    # Перезагружаем каталог из файла
+    global catalog
+    catalog = reload_catalog()
+    
     lot_id = int(call.data.split(":")[1])
     item = next((x for x in catalog if x["id"] == lot_id), None)
     if not item:
@@ -988,8 +1056,11 @@ async def mark_as_sold(call: types.CallbackQuery):
         await call.answer("🚫 Нет прав.", show_alert=True)
         return
     
-    lot_id = int(call.data.split(":")[1])
+    # Перезагружаем каталог из файла
     global catalog
+    catalog = reload_catalog()
+    
+    lot_id = int(call.data.split(":")[1])
     
     # Удаляем лот из каталога
     before = len(catalog)
@@ -997,11 +1068,17 @@ async def mark_as_sold(call: types.CallbackQuery):
     save_catalog()
     
     if len(catalog) < before:
-        await call.message.edit_text(
-            call.message.text + f"\n\n✅ *ЛОТ ПРОДАН И УДАЛЁН ИЗ КАТАЛОГА*",
-            parse_mode="Markdown",
-            reply_markup=None,
-        )
+        try:
+            await call.message.edit_text(
+                call.message.text + f"\n\n✅ *ЛОТ ПРОДАН И УДАЛЁН ИЗ КАТАЛОГА*",
+                parse_mode="Markdown",
+                reply_markup=None,
+            )
+        except:
+            await call.message.answer(
+                call.message.text + f"\n\n✅ *ЛОТ ПРОДАН И УДАЛЁН ИЗ КАТАЛОГА*",
+                parse_mode="Markdown",
+            )
         await call.answer("✅ Лот удалён из каталога")
     else:
         await call.answer("❌ Лот не найден", show_alert=True)
@@ -1091,8 +1168,9 @@ async def user_support(m: types.Message, state: FSMContext):
         reply_markup=cancel_kb,
     )
 
-@dp.message(Support.waiting)
+@dp.message(Support.waiting, ~F.text.in_(["🛒 Продать вещь", "📦 Актуальные лоты", "📞 Поддержка"]))
 async def support_message(m: types.Message, state: FSMContext):
+    """Обработка сообщений в поддержку"""
     # Проверяем отмену первым делом
     if m.text == "❌ Отмена":
         await state.clear()
@@ -1101,6 +1179,12 @@ async def support_message(m: types.Message, state: FSMContext):
     
     if m.from_user.id == ADMIN_ID:
         await state.clear()
+        await m.answer("Вы админ, ваше сообщение не будет отправлено в поддержку.", reply_markup=main_kb)
+        return
+    
+    # Проверяем, что это текстовое сообщение
+    if not m.text:
+        await m.answer("❌ Пожалуйста, отправьте текстовое сообщение.", reply_markup=cancel_kb)
         return
     
     # Отправляем админу
@@ -1113,6 +1197,7 @@ async def support_message(m: types.Message, state: FSMContext):
             parse_mode="Markdown",
         )
         await m.answer("✅ Сообщение отправлено!\n⏳ Ожидайте ответа.", reply_markup=main_kb)
+        logger.info(f"Сообщение в поддержку от {m.from_user.id}: {m.text[:50]}")
     except Exception as e:
         logger.exception(f"Ошибка отправки сообщения в поддержку: {e}")
         await m.answer("❌ Ошибка отправки сообщения. Попробуйте позже.", reply_markup=main_kb)
@@ -1123,6 +1208,17 @@ async def support_message(m: types.Message, state: FSMContext):
 # ========================== Webhook ==============================
 async def on_startup(app: web.Application):
     try:
+        # Проверяем и создаем JSON файлы при запуске
+        logger.info("Проверка JSON файлов при запуске...")
+        init_json_files()
+        
+        # Перезагружаем данные из файлов
+        global catalog, pending
+        catalog = reload_catalog()
+        pending = reload_pending()
+        logger.info(f"Загружено лотов: {len(catalog)}, заявок на модерацию: {len(pending)}")
+        
+        # Устанавливаем webhook
         await bot.set_webhook(WEBHOOK_URL)
         await bot.send_message(ADMIN_ID, "🚀 БОТ ЗАПУЩЕН И ГОТОВ К РАБОТЕ!")
         logger.info(f"Webhook установлен: {WEBHOOK_URL}")
